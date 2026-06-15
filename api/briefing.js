@@ -87,6 +87,7 @@ async function runBriefing() {
 - 일기 요약은 격려 내용을 무조건 1줄 이상 포함
 - 기온은 섭씨(℃)만.
 - "오늘 날씨입니다" 섹션은 절대 줄바꿈하지 말 것. 인사, 날씨, 기온, 외출 참고사항을 모두 띄어쓰기로만 연결해 한 줄(한 문단)로 작성. 줄바꿈이 하나라도 있으면 잘못된 출력임.
+- "오늘 뉴스입니다"의 뉴스1, 뉴스2 각각은 절대 줄바꿈하지 말 것. 문장이 길어지더라도 줄바꿈이나 엔터 없이 본문과 (URL)까지 전부 하나의 줄(한 문단)로 이어서 작성. 뉴스1과 뉴스2 사이에만 줄바꿈 한 번 사용. 위반 시 잘못된 출력임.
 - 뉴스는 반드시 web_search로 오늘 또는 최근 실제 기사를 찾아서 작성. 조중동(조선일보/중앙일보/동아일보) 제외.
 - 뉴스 출처는 (실제 기사 URL) 형식으로, 이모티콘과 하이퍼링크를 쓰더라도도 절대 단독 줄에 쓰지 말 것. 반드시 기사 본문 문장 맨 끝, 같은 줄, 같은 문단에 붙여 쓸 것.
   올바른 예: "정부가 새 정책을 발표했습니다. (https://example.com/news1)"
@@ -306,6 +307,16 @@ function splitBoldMarkdown(line) {
   });
 }
 
+// 뉴스 섹션 전용: 뉴스1/뉴스2 항목 구분(빈 줄 또는 ---)은 유지하고,
+// 각 항목 내부에 모델이 잘못 넣은 줄바꿈은 모두 합쳐서 한 줄로 만든다.
+function normalizeNewsBody(cleanedBody) {
+  const items = cleanedBody
+    .split(/\n\s*(?:---)?\s*\n|\n---\n/)
+    .map((item) => item.split('\n').map((l) => l.trim()).filter(Boolean).join(' '))
+    .filter(Boolean);
+  return items.join('\n---\n');
+}
+
 // 섹션 파싱 후 flat 블록 배열로 조립:
 //   [제목 paragraph] [본문 paragraph...] [divider] [제목 paragraph] ...
 function buildBriefingBlocks(rawText) {
@@ -349,6 +360,11 @@ function buildBriefingBlocks(rawText) {
     // 날씨 섹션: 모델이 줄바꿈을 넣어도 강제로 한 문단화
     if (current.token.sub === '오늘 날씨입니다') {
       cleanedBody = cleanedBody.split('\n').map((l) => l.trim()).filter(Boolean).join(' ');
+    }
+
+    // 뉴스 섹션: 뉴스1/뉴스2 각 항목 내부 줄바꿈을 강제로 한 줄화 (항목 간 구분은 유지)
+    if (current.token.sub === '오늘 뉴스입니다') {
+      cleanedBody = normalizeNewsBody(cleanedBody);
     }
 
     blocks.push(titleParagraph(current.token.official));
