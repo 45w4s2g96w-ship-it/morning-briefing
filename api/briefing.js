@@ -319,8 +319,8 @@ function dividerBlock() {
 
 function emptyParagraph() {
   // rich_text를 완전히 비우면 Notion에서 거의 보이지 않는 줄이 되므로,
-  // 공백 한 글자를 넣어 실제로 줄바꿈처럼 보이는 빈 줄을 만든다.
-  return { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: ' ' } }] } };
+  // zero-width space를 넣어 줄바꿈처럼 보이되 시각적 간격은 최소화한다.
+  return { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: '\u200b' } }] } };
 }
 
 // 제목 paragraph: 볼드 + 밑줄
@@ -501,7 +501,7 @@ function buildBriefingBlocks(rawText) {
     while (blocks.length > 0) {
       const lastBlock = blocks[blocks.length - 1];
       const rt = lastBlock.type === 'paragraph' ? lastBlock.paragraph.rich_text : null;
-      const isEmpty = rt && (rt.length === 0 || (rt.length === 1 && rt[0]?.text?.content?.trim() === ''));
+      const isEmpty = rt && (rt.length === 0 || (rt.length === 1 && ['', '\u200b'].includes(rt[0]?.text?.content?.trim())));
       if (isEmpty) blocks.pop();
       else break;
     }
