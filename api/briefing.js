@@ -61,11 +61,11 @@ async function runBriefing() {
     console.error('diary fetch failed', e);
   }
 
-  const systemPrompt = `너는 사용자(민영)의 아침 브리핑을 작성하는 도우미야. 아래 형식을 정확히 지켜서 한국어로 작성해. 존댓말이면서 친근하고 따뜻한 톤으로. 나중에 음성으로 읽힐 글이라 괄호, 기호 나열처럼 읽기 어색한 표현은 피해.
+  const systemPrompt = `너는 사용자(민영)의 아침 브리핑을 작성하는 도우미야. 아래 형식을 정확히 지켜서 한국어로 작성해. 존댓말이지만 과하게 격식 차리지 않고, 친구처럼 편하고 친근한 톤으로. "~입니다", "~예요", "~했어요", "~하면 돼요" 같은 일반 존댓말은 괜찮지만, "~하셨어요", "~하시는", "~해주시면", "향하시는"처럼 '시'가 들어가는 주체 높임 표현은 쓰지 말 것. 예를 들어 "산책하셨네요"가 아니라 "산책했네요", "챙기시면"이 아니라 "챙기면"으로. 나중에 음성으로 읽힐 글이라 괄호, 기호 나열처럼 읽기 어색한 표현은 피해.
 
 형식 (섹션 헤더는 반드시 아래 텍스트 그대로 써):
 오늘 날씨입니다
-("오늘도 좋은 하루의 시작이에요."로 시작해서 서울의 아침 날씨·기온(섭씨)·외출 참고사항까지 전부 하나의 문단으로 줄바꿈 없이 이어서 작성.)
+("오늘도 좋은 하루의 시작이에요, 민영 씨."로 시작해서 서울의 아침 날씨·기온(섭씨)·외출 참고사항까지 전부 하나의 문단으로 줄바꿈 없이 이어서 작성.)
 
 오늘 일정입니다
 (하루 종일/종일 일정이 있다면 가장 먼저 언급. 여러 날에 걸친 일정(출장, 여행, 워크숍 등)이면 오늘이 며칠째인지 "n일차"로 함께 언급. 이후 시간 순서대로 나머지 일정을 자연스러운 문장으로 이어서. 일정 없으면 "등록된 일정이 없습니다.")
@@ -85,8 +85,7 @@ async function runBriefing() {
 
 규칙:
 - 일기 요약은 격려 내용을 무조건 1줄 이상 포함
-- 사용자를 호칭할 경우에는 민영님 이라고 부를 것. 단 모든 내용에서 언급할 필요는 없고, 맥락상 필요할 때 '님'으로 호칭
-- 기온은 한국이 사용하는 섭씨(℃)만. 
+- 기온은 섭씨(℃)만.
 - "오늘 날씨입니다" 섹션은 절대 줄바꿈하지 말 것. 인사, 날씨, 기온, 외출 참고사항을 모두 띄어쓰기로만 연결해 한 줄(한 문단)로 작성. 줄바꿈이 하나라도 있으면 잘못된 출력임.
 - 뉴스는 반드시 web_search로 오늘 또는 최근 실제 기사를 찾아서 작성. 조중동(조선일보/중앙일보/동아일보) 제외.
 - 뉴스 출처는 (실제 기사 URL) 형식으로, 절대 단독 줄에 쓰지 말 것. 반드시 기사 본문 문장 맨 끝, 같은 줄, 같은 문단에 붙여 쓸 것.
@@ -247,13 +246,15 @@ function bodyParagraph(line) {
 
 // [텍스트](url) 마크다운 링크, **bold**, 줄 끝 단독 (url) 패턴을 모두 처리
 function splitRichText(line) {
-  // 줄 끝 단독 (https://...) 패턴 fallback (혹시 모델이 옛 형식으로 출력한 경우)
+  // 줄 끝 단독 (https://...) 패턴: 본문은 그대로 두고, (URL) 자리를 별도 "🔗" 텍스트로 분리해 링크 적용
   const trailingUrlMatch = line.match(/^(.*)\((https?:\/\/[^\s)]+)\)\s*$/);
   if (trailingUrlMatch && !line.includes('](')) {
     const mainText = trailingUrlMatch[1].trim();
     const linkUrl = trailingUrlMatch[2];
     const parts = splitBoldMarkdown(mainText);
-    if (parts.length > 0) parts[parts.length - 1].text.link = { url: linkUrl };
+    // 본문 뒤에 공백 + 🔗(링크) 조각 추가
+    parts.push({ type: 'text', text: { content: ' ' } });
+    parts.push({ type: 'text', text: { content: '🔗', link: { url: linkUrl } } });
     return parts;
   }
 
@@ -276,12 +277,14 @@ function splitRichText(line) {
   if (lastIndex < line.length) parts.push({ content: line.slice(lastIndex), bold: false, link: null });
   if (parts.length === 0) parts.push({ content: line, bold: false, link: null });
 
-  return parts.map((p) => {
-    const obj = { type: 'text', text: { content: p.content } };
-    if (p.bold) obj.annotations = { bold: true };
-    if (p.link) obj.text.link = { url: p.link };
-    return obj;
-  });
+  return parts.map(toRichTextObj);
+}
+
+function toRichTextObj(p) {
+  const obj = { type: 'text', text: { content: p.content } };
+  if (p.bold) obj.annotations = { bold: true };
+  if (p.link) obj.text.link = { url: p.link };
+  return obj;
 }
 
 function splitBoldMarkdown(line) {
