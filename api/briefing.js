@@ -13,7 +13,7 @@ export default async function handler(req, res) {
 
 async function runBriefing() {
   const NOTION_TOKEN = process.env.NOTION_TOKEN;
-  const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
+  const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY; 
   const ICLOUD_CALENDAR_URLS = process.env.ICLOUD_CALENDAR_URLS;
 
   // ---- 날짜 계산 (KST 기준) ----
@@ -54,7 +54,7 @@ async function runBriefing() {
     console.error('diary fetch failed', e);
   }
 
-  // ---- 3. Gemini API 호출 ----
+  // ---- 3. Claude API 호출용 프롬프트 세팅 ----
   const systemPrompt = `너는 사용자(민영)의 아침 브리핑을 작성하는 도우미야. 다음 형식을 정확히 지켜서 한국어로 작성해. 전체적으로 친절하고 전문적인 느낌이되, 존댓말이면서 아주 약간 캐주얼한 톤으로. 나중에 음성으로 그대로 읽힐 글이라는 걸 염두에 두고, 괄호나 기호 나열처럼 읽기 어색한 표현은 피해.
 
 형식 (각 섹션은 빈 줄로 구분):
@@ -82,7 +82,7 @@ async function runBriefing() {
 규칙:
 - 첫 줄은 반드시 "[WEATHER:날씨상태]" 형식으로 시작해. 날씨상태는 다음 중 하나만 골라 써야 해: 맑음, 구름조금, 흐림, 비, 눈, 천둥번개, 안개. 이 줄에는 이모지나 다른 텍스트를 절대 넣지 마.
 - 기온은 반드시 섭씨(℃) 기준으로만 표기해.
-- "오늘 일정" 섹션은 아래 제공되는 일정 목록을 자연스러운 문장으로 풀어서 작성해.
+- "오늘 일정" 섹션은 아래 제공되는 일정 목록을 그대로 나열하지 말고, 자연스러운 문장으로 풀어서 작성해.
 - 각 섹션 헤더는 이모지 없이 위에 적힌 텍스트 그대로 써.
 - 마지막 섹션의 🏃 줄과 💭 줄은 "행동:" "사고:" 같은 라벨을 쓰지 말고 이모지 바로 뒤에 내용으로 시작해.
 - [WEATHER:날씨상태] 줄 이후에는 다른 어떤 줄에도 이모지를 쓰지 마 (🏃, 💭 제외).
@@ -94,12 +94,12 @@ async function runBriefing() {
 어제 제언 메모: ${diarySuggest || '(없음)'}
 오늘(${todayStr}) 모닝 브리핑을 작성해줘.`;
 
-  const briefingResult = await callGemini(GEMINI_API_KEY, systemPrompt, userPrompt);
+  const briefingResult = await callClaude(ANTHROPIC_API_KEY, systemPrompt, userPrompt);
   const briefingText = briefingResult.text || '(브리핑 생성 실패)';
 
-  // 대제목 양식 반영 [경로: 1]
-  const days = ['일', '월', '화', '수', '목', '금', '토']; [cite: 1]
-  const titleLabel = `${kstNow.getMonth() + 1}월 ${kstNow.getDate()}일 ${days[kstNow.getDay()]}요일 모닝 브리핑 입니다.`; [cite: 1]
+  // 0월 00일 0요일 모닝 브리핑 입니다. 대제목 생성[cite: 1]
+  const days = ['일', '월', '화', '수', '목', '금', '토'];[cite: 1]
+  const titleLabel = `${kstNow.getMonth() + 1}월 ${kstNow.getDate()}일 ${days[kstNow.getDay()]}요일 모닝 브리핑 입니다.`;[cite: 1]
   
   const newBlocks = buildBriefingBlocks(briefingText);
 
@@ -119,6 +119,16 @@ async function runBriefing() {
   let pageResult;
   if (existingPageId) {
     try {
+      // 🌟 [복구 핵심] 중복 실행 시 기존 페이지의 상단 대제목 프로퍼티도 확실하게 강제 업데이트
+      await fetch(`https://api.notion.com/v1/pages/${existingPageId}`, {
+        method: 'PATCH',
+        headers: notionHeaders(NOTION_TOKEN),
+        body: JSON.stringify({
+          properties: { '제목': { title: [{ text: { content: titleLabel } }] } }
+        })
+      });
+
+      // 기존 블록 하위 요소 전체 제거
       const childrenRes = await fetch(`https://api.notion.com/v1/blocks/${existingPageId}/children?page_size=100`, {
         method: 'GET',
         headers: notionHeaders(NOTION_TOKEN),
@@ -129,7 +139,7 @@ async function runBriefing() {
         await fetch(`https://api.notion.com/v1/blocks/${block.id}`, { method: 'DELETE', headers: notionHeaders(NOTION_TOKEN) });
       }
     } catch (e) {
-      console.error('existing blocks delete failed', e);
+      console.error('existing page update or blocks delete failed', e);
     }
     const appendRes = await fetch(`https://api.notion.com/v1/blocks/${existingPageId}/children`, {
       method: 'PATCH',
@@ -139,6 +149,7 @@ async function runBriefing() {
     const appendData = await appendRes.json();
     pageResult = { ok: appendRes.ok, mode: 'updated', pageId: existingPageId, result: appendData };
   } else {
+    // 신규 생성
     const createRes = await fetch(`https://api.notion.com/v1/pages`, {
       method: 'POST',
       headers: notionHeaders(NOTION_TOKEN),
@@ -155,44 +166,35 @@ async function runBriefing() {
   return { ok: pageResult.ok, todayStr, yesterdayStr, todaySchedule, briefingText, debug: briefingResult.debug, notion: pageResult };
 }
 
-async function callGemini(apiKey, systemPrompt, userPrompt) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-  const maxRetries = 3;
-  let delay = 2000;
+// Claude API 호출부
+async function callClaude(apiKey, systemPrompt, userPrompt) {
+  const url = 'https://api.anthropic.com/v1/messages';
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-3-5-sonnet-20241022',
+        max_tokens: 3000,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userPrompt }]
+      })
+    });
 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: systemPrompt }] },
-          contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-          generationConfig: { temperature: 0.7, maxOutputTokens: 3000 }
-        })
-      });
+    const data = await res.json();
+    if (!res.ok || data.error) return { text: '', debug: { stage: 'claude_error', raw: data } };
 
-      const data = await res.json();
+    const text = data.content?.[0]?.text || '';
+    const idx = text.indexOf('[WEATHER:');
+    const finalText = idx >= 0 ? text.slice(idx) : text;
 
-      if (res.status === 503 && attempt < maxRetries) {
-        await new Promise((resolve) => setTimeout(resolve, delay));
-        continue; 
-      }
-
-      if (!res.ok || data.error) return { text: '', debug: { stage: 'gemini_error', raw: data } };
-
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      const idx = text.indexOf('[WEATHER:');
-      const finalText = idx >= 0 ? text.slice(idx) : text;
-
-      return { text: finalText.trim(), debug: null };
-    } catch (error) {
-      if (attempt < maxRetries) {
-        await new Promise((resolve) => setTimeout(resolve, delay));
-        continue;
-      }
-      return { text: '', debug: { stage: 'gemini_fetch_exception', error: String(error) } };
-    }
+    return { text: finalText.trim(), debug: null };
+  } catch (error) {
+    return { text: '', debug: { stage: 'claude_exception', error: String(error) } };
   }
 }
 
@@ -201,7 +203,7 @@ function getRichText(prop) { if (!prop) return ''; if (prop.rich_text) return pr
 
 const WEATHER_EMOJI_MAP = { '맑음': '☀️', '구름조금': '🌤️', '흐림': '☁️', '비': '🌧️', '눈': '❄️', '천둥번개': '⛈️', '안개': '🌫️' };
 
-// 🌟 [구조 변경] 토큰 매칭 후 본문을 하위 자식 블록들(children)로 깔끔하게 조립하는 파서
+// 🌟 [서식 고정 핵심] 노션의 서식 전염 버그를 파괴하고 원래 양식대로 출력하는 인라인 파서
 function buildBriefingBlocks(rawText) {
   const weatherMatch = rawText.match(/^\[WEATHER:([^\]]+)\]\s*\n?/);
   const weatherKey = weatherMatch ? weatherMatch[1].trim() : '';
@@ -219,9 +221,7 @@ function buildBriefingBlocks(rawText) {
   let positions = [];
   tokens.forEach((t) => {
     let pos = text.indexOf(t.sub);
-    if (pos !== -1) {
-      positions.push({ pos, token: t });
-    }
+    if (pos !== -1) positions.push({ pos, token: t });
   });
   positions.sort((a, b) => a.pos - b.pos);
 
@@ -242,21 +242,14 @@ function buildBriefingBlocks(rawText) {
       cleanedBody = cleanedBody.slice('어떨까요?'.length).trim();
     }
 
-    // 콜아웃의 타이틀에는 절대 밑줄을 주지 않고 순수 텍스트만 넣음으로써 전염 버그 완전 방지
     blocks.push({
       object: 'block',
       type: 'callout',
       callout: {
-        rich_text: [
-          {
-            type: 'text',
-            text: { content: current.token.official },
-            annotations: { bold: true }
-          }
-        ],
+        // 하위 자식을 쓰지 않고 하나의 rich_text 배열 안에서 독립된 토큰 단위로 밀어 넣어 밑줄 번짐 방지
+        rich_text: buildFlatCalloutRichText(current.token.official, cleanedBody),
         icon: { type: 'emoji', emoji: current.token.icon },
-        color: 'default',
-        children: buildCalloutChildren(cleanedBody) // 본문은 하위 Paragraph 문단 블록들로 안전하게 삽입
+        color: 'default'
       }
     });
   }
@@ -291,63 +284,67 @@ function splitBoldMarkdown(line, extraAnnotations) {
   });
 }
 
-// 🌟 [대대적 개조] 본문 줄바꿈 및 뉴스 구분선(---)을 노션 고유 블록으로 완벽 치환하는 엔진
-function buildCalloutChildren(body) {
+// 🌟 [핵심 변경 함수] 한 배열 안에서 개별 오브젝트 단위로 서식을 끊어서 매핑하는 클린 양식 빌더
+function buildFlatCalloutRichText(header, body) {
+  const richText = [];
+  
+  // 1. 소제목 박기 (여기에만 볼드 + 밑줄 선언)
+  richText.push({
+    type: 'text',
+    text: { content: header },
+    annotations: { bold: true, underline: true }
+  });
+  
+  // 2. 제목 직후 강제 줄바꿈 주입 (서식 무첨가로 서식 전염 차단)
+  richText.push({
+    type: 'text',
+    text: { content: '\n' }
+  });
+  
+  // 3. 본문 조립 시작
   const lines = body.split('\n');
-  const childBlocks = [];
-
+  let isFirstLine = true;
+  
   lines.forEach((line) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-
-    // 대시 구분선을 만나면 진짜 노션의 '구분선 블록'을 내부에 생성해 가시성 향상
-    if (trimmed === '---') {
-      childBlocks.push({
-        object: 'block',
-        type: 'divider',
-        divider: {}
-      });
+    let currentLine = line.trim();
+    if (!currentLine) return;
+    
+    // 중간 뉴스구분선 서식
+    if (currentLine === '---') {
+      richText.push({ type: 'text', text: { content: '\n─────────────\n' } });
+      isFirstLine = true;
       return;
     }
-
-    const emojiMatch = trimmed.match(/^(🏃|💭)(\s*)/);
-    let finalInlineElements = [];
-    let textToParse = trimmed;
-
-    if (emojiMatch) {
-      finalInlineElements.push({
-        type: 'text',
-        text: { content: emojiMatch[1] },
-        annotations: { bold: true }
-      });
-      textToParse = trimmed.slice(emojiMatch[0].length);
-      if (emojiMatch[2]) {
-        finalInlineElements.push({ type: 'text', text: { content: emojiMatch[2] } });
-      }
+    
+    if (!isFirstLine) {
+      richText.push({ type: 'text', text: { content: '\n' } });
     }
-
-    childBlocks.push({
-      object: 'block',
-      type: 'paragraph',
-      paragraph: {
-        rich_text: emojiMatch 
-          ? [...finalInlineElements, ...splitBoldMarkdown(textToParse, null)]
-          : splitBoldMarkdown(trimmed, null)
-      }
-    });
+    
+    // 🏃, 💭 특수 이모지 볼드 처리
+    const emojiMatch = currentLine.match(/^(🏃|💭)(\s*)/);
+    if (emojiMatch) {
+      richText.push({ type: 'text', text: { content: emojiMatch[1] }, annotations: { bold: true } });
+      currentLine = currentLine.slice(emojiMatch[0].length);
+      richText.push({ type: 'text', text: { content: emojiMatch[2] || ' ' } });
+    }
+    
+    // 나머지 본문 마크다운 볼드 분리 파싱
+    richText.push(...splitBoldMarkdown(currentLine, null));
+    isFirstLine = false;
   });
-
-  return childBlocks;
+  
+  return richText;
 }
 
 function textLinesToParagraphBlocks(text) {
   const lines = text.split('\n'); const blocks = [];
   for (const line of lines) {
     const trimmed = line.trim();
+    if (!trimmed) continue;
     blocks.push({
       object: 'block',
       type: 'paragraph',
-      paragraph: { rich_text: trimmed ? [{ type: 'text', text: { content: trimmed.slice(0, 2000) } }] : [] }
+      paragraph: { rich_text: [{ type: 'text', text: { content: trimmed.slice(0, 2000) } }] }
     });
   }
   return blocks.slice(0, 100);
