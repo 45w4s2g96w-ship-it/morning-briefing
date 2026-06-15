@@ -3,8 +3,12 @@ const MORNING_BRIEFING_DB = '37d51f4140c580dca4d5cbec7e5534e3';
 
 export default async function handler(req, res) {
   // Vercel Cron 보호: 외부에서 함부로 호출 못하게 막음
+  // Cron은 Authorization 헤더로, 수동 테스트는 ?key=로 인증
   const authHeader = req.headers['authorization'] || '';
-  if (process.env.CRON_SECRET && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  const queryKey = req.query?.key;
+  const isCron = authHeader === `Bearer ${process.env.CRON_SECRET}`;
+  const isManual = queryKey === process.env.CRON_SECRET;
+  if (process.env.CRON_SECRET && !isCron && !isManual) {
     return res.status(401).json({ error: 'unauthorized' });
   }
 
