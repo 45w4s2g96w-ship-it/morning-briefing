@@ -37,10 +37,7 @@ async function runBriefing() {
     const diaryRes = await fetch(`https://api.notion.com/v1/databases/${DIARY_DB}/query`, {
       method: 'POST',
       headers: notionHeaders(NOTION_TOKEN),
-      body: JSON.stringify({
-        filter: { property: '날짜', date: { equals: yesterdayStr } },
-        page_size: 1,
-      }),
+      body: JSON.stringify({ filter: { property: '날짜', date: { equals: yesterdayStr } }, page_size: 1 }),
     });
     const diaryData = await diaryRes.json();
     const page = diaryData.results?.[0];
@@ -54,6 +51,7 @@ async function runBriefing() {
     console.error('diary fetch failed', e);
   }
 
+  // 프롬프트 수정: 뉴스를 2개 생성하고 사이에 "---"를 넣도록 명시
   const systemPrompt = `너는 사용자(민영)의 아침 브리핑을 작성하는 도우미야. 다음 형식을 정확히 지켜서 한국어로 작성해. 전체적으로 친절하고 전문적인 느낌이되, 존댓말이면서 아주 약간 캐주얼한 톤으로. 괄호나 기호 나열처럼 읽기 어색한 표현은 피해.
 
 형식 (각 섹션은 빈 줄로 구분):
@@ -66,6 +64,8 @@ async function runBriefing() {
 
 오늘 뉴스입니다
 (뉴스 1) — 오늘 하루 참고하면 좋을 만한 가벼운 기술 트렌드, 일상 트렌드, 또는 긍정적인 인사이트 뉴스를 한두 문장으로 자연스럽게 설명해줘. 설명 문장 끝에 괄호로 가상의 출처 URL을 적어줘. 예: 설명 문장입니다. (https://example.com/article)
+---
+(뉴스 2) — 위와 동일한 방식으로 다른 주제의 유익한 뉴스를 하나 더 적어줘. 설명 문장 끝에 괄호로 가상의 출처 URL을 적어줘. 예: 설명 문장입니다. (https://example.com/article2)
 
 어제는 이런 하루를 보내셨네요
 (어제 일기 요약을 1~2줄로 자연스럽게)
@@ -80,6 +80,7 @@ async function runBriefing() {
 - 첫 줄은 반드시 "[WEATHER:날씨상태]" 형식으로 시작해. 날씨상태는 다음 중 하나만 골라 써야 해: 맑음, 구름조금, 흐림, 비, 눈, 천둥번개, 안개. 이 줄에는 이모지나 다른 텍스트를 절대 넣지 마.
 - 기온은 반드시 섭씨(℃) 기준으로만 표기해.
 - "오늘 일정" 섹션은 아래 제공되는 일정 목록을 자연스러운 문장으로 풀어서 작성해.
+- 각 섹션 헤더는 이모지 없이 위에 적힌 텍스트 그대로 써.
 - 마지막 섹션의 🏃 줄과 💭 줄은 "행동:" "사고:" 같은 라벨을 쓰지 말고 이모지 바로 뒤에 내용으로 시작해.
 - [WEATHER:날씨상태] 줄 이후에는 다른 어떤 줄에도 이모지를 쓰지 마 (🏃, 💭 제외).
 - 출력은 [WEATHER:날씨상태] 줄을 포함한 위 형식 그대로만. 서두/설명 문구를 절대 추가하지 마.`;
@@ -186,21 +187,32 @@ function buildBriefingBlocks(rawText) {
   const blocks = [];
   const sectionHeaderPatterns = [ { re: /^오늘 날씨입니다/, icon: weatherEmoji }, { re: /^오늘 일정입니다/, icon: '📅' }, { re: /^오늘 뉴스입니다/, icon: '📰' }, { re: /^어제는 이런 하루를/, icon: '☺️' } ];
   let currentSection = null; 
+  
   function flushSection() {
     if (!currentSection) return;
     const richTextLines = buildRichTextLinesForCallout(currentSection.lines);
     blocks.push({ object: 'block', type: 'callout', callout: { rich_text: richTextLines, icon: { type: 'emoji', emoji: currentSection.icon || '💬' }, color: 'default' } });
     currentSection = null;
   }
+  
   for (const line of lines) {
-    if (line.length === 0) { if (currentSection) currentSection.lines.push(''); continue; }
+    if (line.trim().length === 0) { 
+      if (currentSection) currentSection.lines.push(''); 
+      continue; 
+    }
     const isLastSectionHeader = /오늘.*이렇게.*해보는.*게/.test(line);
     const headerMatch = isLastSectionHeader ? { icon: '😉' } : sectionHeaderPatterns.find((p) => p.re.test(line));
-    if (headerMatch || isLastSectionHeader) { flushSection(); currentSection = { icon: headerMatch ? headerMatch.icon : '😉', lines: [line] }; continue; }
+    
+    if (headerMatch || isLastSectionHeader) { 
+      flushSection(); 
+      currentSection = { icon: headerMatch ? headerMatch.icon : '😉', lines: [line] }; 
+      continue; 
+    }
     if (!currentSection) currentSection = { icon: '💬', lines: [] };
     currentSection.lines.push(line);
   }
   flushSection();
+  
   const scriptText = buildScriptText(text);
   blocks.push({ object: 'block', type: 'toggle', toggle: { rich_text: [{ type: 'text', text: { content: '스크립트' } }], children: textLinesToParagraphBlocks(scriptText) } });
   return blocks.slice(0, 100);
@@ -223,21 +235,46 @@ function splitBoldMarkdown(line, extraAnnotations) {
   });
 }
 
+// 줄바꿈 매핑 수정 파트 (제목과 본문을 엄격히 구분하여 엔터 유지)
 function buildRichTextLinesForCallout(lines) {
-  const paragraphs = []; let current = [];
-  for (const line of lines) { if (line.length === 0) { if (current.length > 0) { paragraphs.push(current); current = []; } continue; } current.push(line); }
-  if (current.length > 0) paragraphs.push(current);
+  if (!lines || lines.length === 0) return [];
   const richText = [];
-  paragraphs.forEach((paraLines, pIdx) => {
-    const sep = pIdx === 0 ? '' : '\n\n';
-    if (paraLines.length === 1 && paraLines[0].trim() === '---') { richText.push({ type: 'text', text: { content: sep + '─────────────' } }); return; }
-    if (pIdx === 0) { const headerText = paraLines.join(' '); const parts = splitBoldMarkdown(headerText, { bold: true, underline: true }); if (sep) richText.push({ type: 'text', text: { content: sep } }); richText.push(...parts); return; }
-    paraLines.forEach((line, lineIdx) => {
-      const lineSep = lineIdx === 0 ? sep : '\n\n'; const emojiMatch = line.match(/^(🏃|💭)(\s*)/);
-      if (emojiMatch) { if (lineSep) richText.push({ type: 'text', text: { content: lineSep } }); richText.push({ type: 'text', text: { content: emojiMatch[1] }, annotations: { bold: true } }); const rest = line.slice(emojiMatch[0].length); richText.push(...splitBoldMarkdown((emojiMatch[2] || ' ') + rest, null)); return; }
-      const joiner = lineIdx === 0 ? lineSep : ' '; if (joiner) richText.push({ type: 'text', text: { content: joiner } }); richText.push(...splitBoldMarkdown(line, null));
-    });
-  });
+  
+  // 1. 첫 줄은 무조건 대분류 제목(헤더): 볼드 + 밑줄 처리
+  const headerLine = lines[0];
+  richText.push(...splitBoldMarkdown(headerLine, { bold: true, underline: true }));
+
+  // 2. 두 번째 줄부터 본문 내용 매핑 시작
+  let isFirstBodyLine = true;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    
+    // 뉴스의 구분선(---)을 만나면 노션 단락 구분 기호로 이쁘게 변경
+    if (line === '---') {
+      richText.push({ type: 'text', text: { content: '\n\n─────────────' } });
+      isFirstBodyLine = true;
+      continue;
+    }
+    if (line === '') {
+      isFirstBodyLine = true;
+      continue;
+    }
+    
+    // 제목 바로 아랫줄이거나 새로운 단락 시작 시 강제 줄바꿈(\n\n) 추가
+    const sep = isFirstBodyLine ? '\n\n' : ' ';
+    richText.push({ type: 'text', text: { content: sep } });
+
+    const emojiMatch = line.match(/^(🏃|💭)(\s*)/);
+    if (emojiMatch) {
+      richText.push({ type: 'text', text: { content: emojiMatch[1] }, annotations: { bold: true } });
+      const rest = line.slice(emojiMatch[0].length);
+      richText.push(...splitBoldMarkdown((emojiMatch[2] || ' ') + rest, null));
+      isFirstBodyLine = true; // 🏃, 💭 파트가 끝나면 다음 줄은 강제로 아래로 밀어냄
+    } else {
+      richText.push(...splitBoldMarkdown(line, null));
+      isFirstBodyLine = false;
+    }
+  }
   return richText;
 }
 
@@ -248,10 +285,21 @@ function textLinesToParagraphBlocks(text) {
 }
 
 function buildScriptText(text) {
-  const lines = text.split('\n');
-  const cleanedLines = lines.map((line) => { if (line.trim() === '---') return ''; return line.replace(/\*\*(.+?)\*\*/g, '$1').replace(/\(https?:\/\/[^)]+\)\s*$/g, '').replace(/https?:\/\/\S+/g, '').replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '').trim(); });
+  let script = text;
+  ['오늘 날씨입니다', '오늘 일정입니다', '오늘 뉴스입니다', '어제는 이런 하루를 보내셨네요', '오늘은 이렇게 해보는 게 어떨까요?'].forEach(header => {
+    script = script.replace(new RegExp(`^${header}\\s*`, 'gm'), `${header}\n`);
+  });
+
+  const lines = script.split('\n');
+  const cleanedLines = lines.map((line) => {
+    if (line.trim() === '---') return '';
+    return line.replace(/\*\*(.+?)\*\*/g, '$1').replace(/\(https?:\/\/[^)]+\)\s*$/g, '').replace(/https?:\/\/\S+/g, '').replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '').trim();
+  });
   const paragraphs = []; let current = [];
-  for (const line of cleanedLines) { if (line === '') { if (current.length > 0) { paragraphs.push(current.join(' ')); current = []; } continue; } current.push(line); }
+  for (const line of cleanedLines) {
+    if (line === '') { if (current.length > 0) { paragraphs.push(current.join(' ')); current = []; } continue; }
+    current.push(line);
+  }
   if (current.length > 0) paragraphs.push(current.join(' ')); return paragraphs.join('\n\n').trim();
 }
 
