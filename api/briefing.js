@@ -65,27 +65,30 @@ async function runBriefing() {
 
 형식 (섹션 헤더는 반드시 아래 텍스트 그대로 써):
 오늘 날씨입니다
-(첫 줄은 반드시 "오늘도 좋은 하루의 시작이에요, 민영 씨." 로 시작. 이어서 서울의 아침 날씨, 기온(섭씨), 외출 참고사항을 자연스러운 문장으로.)
+("오늘도 좋은 하루의 시작이에요, 민영 씨."로 시작해서 서울의 아침 날씨·기온(섭씨)·외출 참고사항까지 전부 하나의 문단으로 줄바꿈 없이 이어서 작성.)
 
 오늘 일정입니다
-(오늘 일정을 자연스러운 문장으로 풀어서. 일정 없으면 "등록된 일정이 없습니다.")
+(하루 종일/종일 일정이 있다면 가장 먼저 언급. 여러 날에 걸친 일정(출장, 여행, 워크숍 등)이면 오늘이 며칠째인지 "n일차"로 함께 언급. 이후 시간 순서대로 나머지 일정을 자연스러운 문장으로 이어서. 일정 없으면 "등록된 일정이 없습니다.")
 
 오늘 뉴스입니다
-(뉴스 1 본문. 국내외 정치·사회·경제 시사 이슈 중 오늘의 주요 뉴스 하나를 한두 문장으로. 문장 끝에 (언론사명) 형태로 출처를 표기하고, 그 언론사명에 기사 URL을 마크다운 링크 [언론사명](URL) 형식으로 연결.)
-(뉴스 2 본문. 위와 다른 주제의 주요 시사 뉴스 하나를 한두 문장으로. 반드시 작성해야 해. 동일하게 [언론사명](URL) 형식으로 출처 연결.)
+(뉴스 1 본문. 국내외 정치·사회·경제 시사 이슈 중 오늘의 주요 뉴스 하나를 한두 문장으로 쓰고, 문장 바로 뒤에 줄바꿈 없이 이어서 [언론사명](URL) 형식으로 출처 표기.)
+(여기서 한 번 줄바꿈.)
+(뉴스 2 본문. 위와 다른 주제의 주요 시사 뉴스 하나를 한두 문장으로. 반드시 작성해야 해. 동일하게 문장 바로 뒤에 줄바꿈 없이 [언론사명](URL) 형식으로 출처 표기.)
 
 어제는 이런 하루를 보내셨네요
 (어제 일기 요약 1~2줄.)
 
 오늘은 이렇게 해보는 게 어떨까요
 (행동 제안 한 문단. "이러면 ~예요." 형식으로 마무리.)
+(여기서 한 번 줄바꿈.)
 (인지 관점 전환 한 문단. "이렇게 보면 ~일 거예요." 또는 "~을 기억해 보세요." 형식으로 마무리.)
 
 규칙:
 - 일기 요약은 격려 내용을 무조건 1줄 이상 포함
 - 기온은 섭씨(℃)만.
 - 뉴스는 반드시 web_search로 오늘 또는 최근 실제 기사를 찾아서 작성. 조중동(조선일보/중앙일보/동아일보) 제외.
-- 뉴스 출처는 반드시 [언론사명](실제 기사 URL) 마크다운 링크 형식으로만 표기. (URL) 단독 표기 금지.
+- 뉴스 출처 [언론사명](URL)은 본문 문장과 같은 줄에 줄바꿈 없이 붙여서 작성. (URL) 단독 표기 금지.
+- 줄바꿈(엔터)은 "오늘 뉴스입니다"의 뉴스1↔뉴스2 사이, "오늘은 이렇게 해보는 게 어떨까요"의 행동제안↔인지전환 사이에서만 사용. 다른 섹션은 한 문단으로 줄바꿈 없이.
 - 이모지 전체 출력에서 절대 사용 금지.
 - 섹션 헤더 외 설명 문구 추가 금지. 출력은 위 형식 그대로만.`;
 
@@ -356,61 +359,7 @@ function buildBriefingBlocks(rawText) {
     }
   }
 
-  // 스크립트 토글
-  blocks.push(dividerBlock());
-  const scriptText = buildScriptText(text);
-  blocks.push({
-    object: 'block',
-    type: 'toggle',
-    toggle: {
-      rich_text: [{ type: 'text', text: { content: '스크립트' } }],
-      children: textLinesToParagraphBlocks(scriptText)
-    }
-  });
-
   return blocks.slice(0, 100);
-}
-
-function textLinesToParagraphBlocks(text) {
-  const blocks = [];
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    blocks.push({
-      object: 'block',
-      type: 'paragraph',
-      paragraph: { rich_text: [{ type: 'text', text: { content: trimmed.slice(0, 2000) } }] }
-    });
-  }
-  return blocks.slice(0, 100);
-}
-
-// 음성용 스크립트: 링크/마크다운/이모지 제거하고 문단으로 합치기
-function buildScriptText(text) {
-  let script = text;
-  ['오늘 날씨입니다', '오늘 일정입니다', '오늘 뉴스입니다', '어제는 이런 하루를 보내셨네요', '오늘은 이렇게 해보는 게 어떨까요?', '오늘은 이렇게 해보는 게 어떨까요'].forEach(h => {
-    script = script.replace(new RegExp(`^${h}\\s*`, 'gm'), `${h}\n`);
-  });
-
-  const paragraphs = [];
-  let current = [];
-  for (const line of script.split('\n')) {
-    const trimmed = line
-      .replace(/\[SUGGEST2\]/g, '')
-      .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '$1')
-      .replace(/\*\*(.+?)\*\*/g, '$1')
-      .replace(/\(https?:\/\/[^)]+\)\s*$/g, '')
-      .replace(/https?:\/\/\S+/g, '')
-      .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '')
-      .trim();
-    if (!trimmed || trimmed === '---') {
-      if (current.length > 0) { paragraphs.push(current.join(' ')); current = []; }
-      continue;
-    }
-    current.push(trimmed);
-  }
-  if (current.length > 0) paragraphs.push(current.join(' '));
-  return paragraphs.join('\n\n').trim();
 }
 
 async function fetchTodayEvents(icsUrls, todayStr) {
@@ -426,8 +375,14 @@ async function fetchTodayEvents(icsUrls, todayStr) {
       console.error('calendar fetch failed:', url, e);
     }
   }
-  events.sort();
-  return events.map((e) => e.replace(/^\S+\|/, '')).join(', ');
+  // sortKey|isTimed|label 형식: 종일 일정(isTimed=0)이 먼저, 그 다음 시간순
+  events.sort((a, b) => {
+    const [aKey, aTimed] = a.split('|');
+    const [bKey, bTimed] = b.split('|');
+    if (aTimed !== bTimed) return aTimed.localeCompare(bTimed);
+    return aKey.localeCompare(bKey);
+  });
+  return events.map((e) => e.split('|').slice(2).join('|')).join(', ');
 }
 
 function parseIcsForDate(icsText, todayStr) {
@@ -456,15 +411,24 @@ function parseIcsForDate(icsText, todayStr) {
     }
     if (!occurs) continue;
     let timeLabel = '하루 종일';
-    let sortKey = '99:99';
+    let sortKey = '00:00';
+    let dayInfo = '';
     if (timeStr) {
       let hour = parseInt(timeStr.slice(0, 2), 10);
       const min = timeStr.slice(2, 4);
       if (isUTC) hour = (hour + 9) % 24;
       timeLabel = `${String(hour).padStart(2, '0')}:${min}`;
       sortKey = timeLabel;
+    } else {
+      // 하루 종일 이벤트: 시작일부터 오늘까지 며칠째인지 계산 (2일 이상일 때만 표기)
+      const startDate = toDate(eventStart);
+      const targetDateObj = toDate(targetDate);
+      const dayNum = Math.round((targetDateObj - startDate) / 86400000) + 1;
+      if (dayNum >= 2) dayInfo = ` (${dayNum}일차)`;
+      sortKey = '00:00'; // 하루 종일은 최우선 정렬
     }
-    results.push(`${sortKey}|${timeLabel} ${summary}`);
+    const label = timeStr ? `${timeLabel} ${summary}` : `${timeLabel} ${summary}${dayInfo}`;
+    results.push(`${sortKey}|${timeStr ? '1' : '0'}|${label}`);
   }
   return results;
 }
