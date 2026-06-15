@@ -82,7 +82,7 @@ async function runBriefing() {
 규칙:
 - 첫 줄은 반드시 "[WEATHER:날씨상태]" 형식으로 시작해. 날씨상태는 다음 중 하나만 골라 써야 해: 맑음, 구름조금, 흐림, 비, 눈, 천둥번개, 안개. 이 줄에는 이모지나 다른 텍스트를 절대 넣지 마.
 - 기온은 반드시 섭씨(℃) 기준으로만 표기해.
-- "오늘 일정" 섹션은 아래 제공되는 일정 목록을 그대로 나열하지 말고, 자연스러운 문장으로 풀어서 작성해.
+- "오늘 일정" 섹션은 아래 제공되는 일정 목록을 자연스러운 문장으로 풀어서 작성해.
 - 각 섹션 헤더는 이모지 없이 위에 적힌 텍스트 그대로 써.
 - 마지막 섹션의 🏃 줄과 💭 줄은 "행동:" "사고:" 같은 라벨을 쓰지 말고 이모지 바로 뒤에 내용으로 시작해.
 - [WEATHER:날씨상태] 줄 이후에는 다른 어떤 줄에도 이모지를 쓰지 마 (🏃, 💭 제외).
@@ -97,9 +97,9 @@ async function runBriefing() {
   const briefingResult = await callGemini(GEMINI_API_KEY, systemPrompt, userPrompt);
   const briefingText = briefingResult.text || '(브리핑 생성 실패)';
 
-  // 0월 00일 0요일 모닝 브리핑 입니다. 형태로 대제목 생성 규칙 변경 [source: 1]
-  const days = ['일', '월', '화', '수', '목', '금', '토']; [source: 1]
-  const titleLabel = `${kstNow.getMonth() + 1}월 ${kstNow.getDate()}일 ${days[kstNow.getDay()]}요일 모닝 브리핑 입니다.`; [source: 1]
+  // 대제목 양식 반영 [경로: 1]
+  const days = ['일', '월', '화', '수', '목', '금', '토']; [cite: 1]
+  const titleLabel = `${kstNow.getMonth() + 1}월 ${kstNow.getDate()}일 ${days[kstNow.getDay()]}요일 모닝 브리핑 입니다.`; [cite: 1]
   
   const newBlocks = buildBriefingBlocks(briefingText);
 
@@ -157,9 +157,8 @@ async function runBriefing() {
 
 async function callGemini(apiKey, systemPrompt, userPrompt) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-  
-  const maxRetries = 3; // 최대 3번 재시도
-  let delay = 2000;     // 에러 발생 시 2초 대기
+  const maxRetries = 3;
+  let delay = 2000;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
@@ -175,9 +174,7 @@ async function callGemini(apiKey, systemPrompt, userPrompt) {
 
       const data = await res.json();
 
-      // 만약 503 에러가 나면 2초 쉬고 다음 루프로 넘어가서 다시 시도함
       if (res.status === 503 && attempt < maxRetries) {
-        console.warn(`[Gemini 503 에러 발생] ${attempt}번째 실패. ${delay/1000}초 후 다시 시도합니다...`);
         await new Promise((resolve) => setTimeout(resolve, delay));
         continue; 
       }
@@ -189,7 +186,6 @@ async function callGemini(apiKey, systemPrompt, userPrompt) {
       const finalText = idx >= 0 ? text.slice(idx) : text;
 
       return { text: finalText.trim(), debug: null };
-
     } catch (error) {
       if (attempt < maxRetries) {
         await new Promise((resolve) => setTimeout(resolve, delay));
@@ -205,14 +201,13 @@ function getRichText(prop) { if (!prop) return ''; if (prop.rich_text) return pr
 
 const WEATHER_EMOJI_MAP = { '맑음': '☀️', '구름조금': '🌤️', '흐림': '☁️', '비': '🌧️', '눈': '❄️', '천둥번개': '⛈️', '안개': '🌫️' };
 
-// 🌟 [핵심 수정] 글이 한 줄로 뭉쳐 나와도 완벽히 분리해내는 토큰 파서
+// 🌟 [구조 변경] 토큰 매칭 후 본문을 하위 자식 블록들(children)로 깔끔하게 조립하는 파서
 function buildBriefingBlocks(rawText) {
   const weatherMatch = rawText.match(/^\[WEATHER:([^\]]+)\]\s*\n?/);
   const weatherKey = weatherMatch ? weatherMatch[1].trim() : '';
   const weatherEmoji = WEATHER_EMOJI_MAP[weatherKey] || '🌤️';
   const text = weatherMatch ? rawText.slice(weatherMatch[0].length) : rawText;
 
-  // 감지할 핵심 헤더 토큰 정의
   const tokens = [
     { sub: '오늘 날씨입니다', icon: weatherEmoji, official: '오늘 날씨입니다' },
     { sub: '오늘 일정입니다', icon: '📅', official: '오늘 일정입니다' },
@@ -240,7 +235,6 @@ function buildBriefingBlocks(rawText) {
     let chunk = next ? text.slice(startBody, next.pos) : text.slice(startBody);
     let cleanedBody = chunk.trim();
 
-    // 혹시 매칭되고 남은 잔여 텍스트 찌꺼기 제거
     if (current.token.sub === '어제는 이런 하루를' && cleanedBody.startsWith('보내셨네요')) {
       cleanedBody = cleanedBody.slice('보내셨네요'.length).trim();
     }
@@ -248,18 +242,25 @@ function buildBriefingBlocks(rawText) {
       cleanedBody = cleanedBody.slice('어떨까요?'.length).trim();
     }
 
+    // 콜아웃의 타이틀에는 절대 밑줄을 주지 않고 순수 텍스트만 넣음으로써 전염 버그 완전 방지
     blocks.push({
       object: 'block',
       type: 'callout',
       callout: {
-        rich_text: buildCalloutRichText(current.token.official, cleanedBody),
+        rich_text: [
+          {
+            type: 'text',
+            text: { content: current.token.official },
+            annotations: { bold: true }
+          }
+        ],
         icon: { type: 'emoji', emoji: current.token.icon },
-        color: 'default'
+        color: 'default',
+        children: buildCalloutChildren(cleanedBody) // 본문은 하위 Paragraph 문단 블록들로 안전하게 삽입
       }
     });
   }
 
-  // 하단 스크립트 접기 블록
   const scriptText = buildScriptText(text);
   blocks.push({
     object: 'block',
@@ -290,55 +291,65 @@ function splitBoldMarkdown(line, extraAnnotations) {
   });
 }
 
-// 🌟 [가장 중요] 헤더와 본문을 분리하고 내부 줄바꿈(\n\n) 및 특수 기호를 살리는 서식 빌더
-function buildCalloutRichText(header, body) {
-  const richText = [];
-  
-  // 1. 대제목 헤더 박기 (볼드 + 밑줄)
-  richText.push({
-    type: 'text',
-    text: { content: header },
-    annotations: { bold: true, underline: true }
-  });
-  
-  // 헤더 아래 본문 시작 전 간격 확보
-  richText.push({ type: 'text', text: { content: '\n\n' } });
-  
-  // 2. 본문 분리 매핑 (제미나이가 준 엔터값 유지 및 뉴스 구분선 처리)
+// 🌟 [대대적 개조] 본문 줄바꿈 및 뉴스 구분선(---)을 노션 고유 블록으로 완벽 치환하는 엔진
+function buildCalloutChildren(body) {
   const lines = body.split('\n');
-  let isFirst = true;
+  const childBlocks = [];
 
   lines.forEach((line) => {
-    let currentLine = line.trim();
-    if (!currentLine) return;
-    
-    if (currentLine === '---') {
-      richText.push({ type: 'text', text: { content: '\n\n─────────────\n\n' } });
-      isFirst = true;
+    const trimmed = line.trim();
+    if (!trimmed) return;
+
+    // 대시 구분선을 만나면 진짜 노션의 '구분선 블록'을 내부에 생성해 가시성 향상
+    if (trimmed === '---') {
+      childBlocks.push({
+        object: 'block',
+        type: 'divider',
+        divider: {}
+      });
       return;
     }
-    
-    if (!isFirst) {
-      richText.push({ type: 'text', text: { content: '\n\n' } });
-    }
-    
-    const emojiMatch = currentLine.match(/^(🏃|💭)(\s*)/);
+
+    const emojiMatch = trimmed.match(/^(🏃|💭)(\s*)/);
+    let finalInlineElements = [];
+    let textToParse = trimmed;
+
     if (emojiMatch) {
-      richText.push({ type: 'text', text: { content: emojiMatch[1] }, annotations: { bold: true } });
-      currentLine = currentLine.slice(emojiMatch[0].length);
-      richText.push({ type: 'text', text: { content: emojiMatch[2] || ' ' } });
+      finalInlineElements.push({
+        type: 'text',
+        text: { content: emojiMatch[1] },
+        annotations: { bold: true }
+      });
+      textToParse = trimmed.slice(emojiMatch[0].length);
+      if (emojiMatch[2]) {
+        finalInlineElements.push({ type: 'text', text: { content: emojiMatch[2] } });
+      }
     }
-    
-    richText.push(...splitBoldMarkdown(currentLine, null));
-    isFirst = false;
+
+    childBlocks.push({
+      object: 'block',
+      type: 'paragraph',
+      paragraph: {
+        rich_text: emojiMatch 
+          ? [...finalInlineElements, ...splitBoldMarkdown(textToParse, null)]
+          : splitBoldMarkdown(trimmed, null)
+      }
+    });
   });
-  
-  return richText;
+
+  return childBlocks;
 }
 
 function textLinesToParagraphBlocks(text) {
   const lines = text.split('\n'); const blocks = [];
-  for (const line of lines) { for (let i = 0; i < Math.max(line.length, 1); i += 2000) { const chunk = line.slice(i, i + 2000); blocks.push({ object: 'block', type: 'paragraph', paragraph: { rich_text: chunk ? [{ type: 'text', text: { content: chunk } }] : [] } }); if (line.length === 0) break; } }
+  for (const line of lines) {
+    const trimmed = line.trim();
+    blocks.push({
+      object: 'block',
+      type: 'paragraph',
+      paragraph: { rich_text: trimmed ? [{ type: 'text', text: { content: trimmed.slice(0, 2000) } }] : [] }
+    });
+  }
   return blocks.slice(0, 100);
 }
 
