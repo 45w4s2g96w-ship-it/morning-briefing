@@ -3,8 +3,6 @@ const MORNING_BRIEFING_DB = '37d51f4140c580dca4d5cbec7e5534e3';
 const NEWS_DB = '38051f4140c580ac9e15000b67739202';
 
 export default async function handler(req, res) {
-  // Vercel Cron 보호: 외부에서 함부로 호출 못하게 막음
-  // Cron은 Authorization 헤더로, 수동 테스트는 ?key=로 인증
   const authHeader = req.headers['authorization'] || '';
   const queryKey = req.query?.key;
   const isCron = authHeader === `Bearer ${process.env.CRON_SECRET}`;
@@ -12,7 +10,6 @@ export default async function handler(req, res) {
   if (process.env.CRON_SECRET && !isCron && !isManual) {
     return res.status(401).json({ error: 'unauthorized' });
   }
-
   try {
     const result = await runBriefing();
     return res.status(200).json(result);
@@ -62,13 +59,11 @@ async function runBriefing() {
     console.error('diary fetch failed', e);
   }
 
-  // 최근 3일 이내 사용한 뉴스 URL 목록 (중복 방지용)
   let recentNewsUrls = [];
   try {
     const threeDaysAgo = new Date(kstNow);
     threeDaysAgo.setUTCDate(threeDaysAgo.getUTCDate() - 3);
     const threeDaysAgoStr = threeDaysAgo.toISOString().slice(0, 10);
-
     const newsRes = await fetch(`https://api.notion.com/v1/databases/${NEWS_DB}/query`, {
       method: 'POST',
       headers: notionHeaders(NOTION_TOKEN),
@@ -114,7 +109,7 @@ async function runBriefing() {
 - "오늘 뉴스입니다"의 뉴스1, 뉴스2는 각각 반드시 하나의 단락(한 줄)으로만 작성. 문장이 길어지더라도 중간에 빈 줄을 넣어 두 단락으로 나누는 것 절대 금지. 본문과 (URL)까지 전부 줄바꿈 없이 하나의 줄로 이어서 작성. 뉴스1 전체가 한 줄, 뉴스2 전체가 한 줄, 이 둘 사이에만 줄바꿈 한 번 사용. 위반 시 잘못된 출력임.
 - 뉴스는 반드시 web_search로 "어제 오후부터 오늘까지" 발행된 실제 기사 중에서 찾아서 작성. 조중동(조선일보/중앙일보/동아일보) 제외.
 - 아래 "제외할 뉴스 URL 목록"에 있는 URL과 동일하거나 같은 사안을 다룬 기사는 절대 선택하지 말 것. 반드시 새로운 주제의 기사를 찾을 것.
-- 뉴스 출처는 (실제 기사 URL) 형식으로, 이모티콘과 하이퍼링크를 쓰더라도도 절대 단독 줄에 쓰지 말 것. 반드시 기사 본문 문장 맨 끝, 같은 줄, 같은 문단에 붙여 쓸 것.
+- 뉴스 출처는 (실제 기사 URL) 형식으로, 이모티콘과 하이퍼링크를 쓰더라도 절대 단독 줄에 쓰지 말 것. 반드시 기사 본문 문장 맨 끝, 같은 줄, 같은 문단에 붙여 쓸 것.
   올바른 예: "정부가 새 정책을 발표했습니다. (https://example.com/news1)"
   잘못된 예: "정부가 새 정책을 발표했습니다.\n(https://example.com/news1)" (줄바꿈 금지)
 - URL은 반드시 해당 기사 개별 페이지의 직접 링크(article permalink)여야 함. 언론사 홈페이지(예: https://www.hani.co.kr), 섹션 목록 페이지(예: /politics, /national), 검색 결과 페이지 URL은 절대 사용 금지. 기사 제목과 본문 내용이 그 URL에 그대로 존재해야 함.
@@ -148,7 +143,6 @@ ${newsExcludeText}
   const briefingResult = await callClaude(ANTHROPIC_API_KEY, systemPrompt, userPrompt);
   const rawBriefingText = briefingResult.text || '(브리핑 생성 실패)';
 
-  // [NEWS_META] 이후 메타데이터(뉴스 제목|URL 2줄)를 분리
   const { briefingText, newsMeta } = extractNewsMeta(rawBriefingText);
 
   const days = ['일', '월', '화', '수', '목', '금', '토'];
@@ -214,7 +208,6 @@ ${newsExcludeText}
     pageResult = { ok: createRes.ok, mode: 'created', pageId: createData.id, result: createData };
   }
 
-  // 오늘 사용한 뉴스 2건을 News DB에 새 페이지로 저장 (중복 방지용 히스토리)
   let newsSaveResult = null;
   if (newsMeta.length > 0) {
     try {
@@ -243,39 +236,19 @@ ${newsExcludeText}
   return { ok: pageResult.ok, todayStr, yesterdayStr, todaySchedule, briefingText, newsMeta, newsSave: newsSaveResult, debug: briefingResult.debug, notion: pageResult };
 }
 
-// briefingText 끝의 [NEWS_META] 블록을 분리해 { briefingText, newsMeta } 형태로 반환
-// newsMeta: [{ title, url }, ...] (뉴스1, 뉴스2)
-function extractNewsMeta(rawText) {
-  const markerIndex = rawText.indexOf('[NEWS_META]');
-  if (markerIndex === -1) return { briefingText: rawText.trim(), newsMeta: [] };
-
-  const briefingPart = rawText.slice(0, markerIndex).trim();
-  const metaPart = rawText.slice(markerIndex + '[NEWS_META]'.length).trim();
-
-  const newsMeta = metaPart
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const idx = line.lastIndexOf('|');
-      if (idx === -1) return null;
-      const title = line.slice(0, idx).trim();
-      const url = line.slice(idx + 1).trim();
-      if (!title || !/^https?:\/\//.test(url)) return null;
-      return { title, url };
-    })
-    .filter(Boolean);
-
-  return { briefingText: briefingPart, newsMeta };
-}
-
-// Claude API 호출 (web_search 도구 사용, 멀티턴으로 최종 텍스트 추출)
+// ============================================
+// Claude API 호출 — 개선된 버전
+// 변경 1: 최대 5턴 → 3턴
+// 변경 2: max_tokens 4000 → 2000
+// 변경 3: 다음 턴으로 넘길 때 tool_result 블록(검색 결과 전문) 제거
+//          → 입력 토큰 누적 폭주 방지
+// ============================================
 async function callClaude(apiKey, systemPrompt, userPrompt) {
   try {
     const messages = [{ role: 'user', content: userPrompt }];
     let finalText = '';
 
-    for (let turn = 0; turn < 5; turn++) {
+    for (let turn = 0; turn < 3; turn++) {  // 5 → 3턴
       const res = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -285,7 +258,7 @@ async function callClaude(apiKey, systemPrompt, userPrompt) {
         },
         body: JSON.stringify({
           model: 'claude-sonnet-4-6',
-          max_tokens: 4000,
+          max_tokens: 2000,  // 4000 → 2000
           system: systemPrompt,
           messages,
           tools: [{ type: 'web_search_20250305', name: 'web_search' }]
@@ -299,9 +272,17 @@ async function callClaude(apiKey, systemPrompt, userPrompt) {
 
       if (data.stop_reason !== 'tool_use') break;
 
-      // 서버사이드 web_search는 도구 실행/결과가 API 내부에서 처리되어 content에 함께 반환됨.
-      // 다음 턴 진행을 위해 assistant 메시지를 그대로 누적.
-      messages.push({ role: 'assistant', content: data.content });
+      // tool_result(검색 결과 전문) 블록을 제거하고 검색 쿼리 정보만 남겨서
+      // 다음 턴 입력 토큰 누적을 최소화
+      const trimmedContent = (data.content || []).map((block) => {
+        if (block.type === 'tool_result') {
+          // 검색 결과 전문 대신 "(검색 완료)"로 대체
+          return { ...block, content: '(검색 완료)' };
+        }
+        return block;
+      });
+
+      messages.push({ role: 'assistant', content: trimmedContent });
     }
 
     return { text: finalText.trim(), debug: null };
@@ -310,82 +291,59 @@ async function callClaude(apiKey, systemPrompt, userPrompt) {
   }
 }
 
+function extractNewsMeta(rawText) {
+  const markerIndex = rawText.indexOf('[NEWS_META]');
+  if (markerIndex === -1) return { briefingText: rawText.trim(), newsMeta: [] };
+  const briefingPart = rawText.slice(0, markerIndex).trim();
+  const metaPart = rawText.slice(markerIndex + '[NEWS_META]'.length).trim();
+  const newsMeta = metaPart
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const idx = line.lastIndexOf('|');
+      if (idx === -1) return null;
+      const title = line.slice(0, idx).trim();
+      const url = line.slice(idx + 1).trim();
+      if (!title || !/^https?:\/\//.test(url)) return null;
+      return { title, url };
+    })
+    .filter(Boolean);
+  return { briefingText: briefingPart, newsMeta };
+}
+
 function notionHeaders(token) { return { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'Notion-Version': '2022-06-28' }; }
 function getRichText(prop) { if (!prop) return ''; if (prop.rich_text) return prop.rich_text.map((t) => t.plain_text).join(''); if (prop.title) return prop.title.map((t) => t.plain_text).join(''); return ''; }
+function dividerBlock() { return { object: 'block', type: 'divider', divider: {} }; }
+function emptyParagraph() { return { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: '\u200b' } }] } }; }
+function titleParagraph(text) { return { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: text }, annotations: { bold: true, underline: true } }] } }; }
+function bodyParagraph(line) { return { object: 'block', type: 'paragraph', paragraph: { rich_text: splitRichText(line) } }; }
 
-function dividerBlock() {
-  return { object: 'block', type: 'divider', divider: {} };
-}
-
-function emptyParagraph() {
-  // rich_text를 완전히 비우면 Notion에서 거의 보이지 않는 줄이 되므로,
-  // zero-width space를 넣어 줄바꿈처럼 보이되 시각적 간격은 최소화한다.
-  return { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: '\u200b' } }] } };
-}
-
-// 제목 paragraph: 볼드 + 밑줄
-function titleParagraph(text) {
-  return {
-    object: 'block',
-    type: 'paragraph',
-    paragraph: {
-      rich_text: [{ type: 'text', text: { content: text }, annotations: { bold: true, underline: true } }]
-    }
-  };
-}
-
-// 본문 paragraph: **..** 마크다운 볼드 + (URL) 하이퍼링크 처리
-function bodyParagraph(line) {
-  return {
-    object: 'block',
-    type: 'paragraph',
-    paragraph: { rich_text: splitRichText(line) }
-  };
-}
-
-// [텍스트](url) 마크다운 링크, **bold**, 줄 끝 단독 (url) 패턴을 모두 처리
 function splitRichText(line) {
-  // 줄 끝 단독 (https://...) 패턴: 본문은 그대로 두고, (URL) 자리를 별도 "🔗" 텍스트로 분리해 링크 적용
   const trailingUrlMatch = line.match(/^(.*)\((https?:\/\/[^\s)]+)\)\s*$/);
   if (trailingUrlMatch && !line.includes('](')) {
     const mainText = trailingUrlMatch[1].trim();
     const linkUrl = trailingUrlMatch[2];
     const parts = splitBoldMarkdown(mainText);
-    // 본문 뒤에 공백 + 🔗(링크) 조각 추가
     parts.push({ type: 'text', text: { content: ' ' } });
     parts.push({ type: 'text', text: { content: '🔗', link: { url: linkUrl } } });
     return parts;
   }
-
-  // [텍스트](url) 마크다운 링크 + **bold** 토큰화
   const parts = [];
   const regex = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|\*\*(.+?)\*\*/g;
   let lastIndex = 0;
   let m;
   while ((m = regex.exec(line)) !== null) {
     if (m.index > lastIndex) parts.push({ content: line.slice(lastIndex, m.index), bold: false, link: null });
-    if (m[1] !== undefined) {
-      // [텍스트](url)
-      parts.push({ content: m[1], bold: false, link: m[2] });
-    } else {
-      // **bold**
-      parts.push({ content: m[3], bold: true, link: null });
-    }
+    if (m[1] !== undefined) parts.push({ content: m[1], bold: false, link: m[2] });
+    else parts.push({ content: m[3], bold: true, link: null });
     lastIndex = m.index + m[0].length;
   }
   if (lastIndex < line.length) parts.push({ content: line.slice(lastIndex), bold: false, link: null });
   if (parts.length === 0) parts.push({ content: line, bold: false, link: null });
-
   return parts.map(toRichTextObj);
 }
-
-function toRichTextObj(p) {
-  const obj = { type: 'text', text: { content: p.content } };
-  if (p.bold) obj.annotations = { bold: true };
-  if (p.link) obj.text.link = { url: p.link };
-  return obj;
-}
-
+function toRichTextObj(p) { const obj = { type: 'text', text: { content: p.content } }; if (p.bold) obj.annotations = { bold: true }; if (p.link) obj.text.link = { url: p.link }; return obj; }
 function splitBoldMarkdown(line) {
   const parts = [];
   const regex = /\*\*(.+?)\*\*/g;
@@ -398,24 +356,10 @@ function splitBoldMarkdown(line) {
   }
   if (lastIndex < line.length) parts.push({ content: line.slice(lastIndex), bold: false });
   if (parts.length === 0) parts.push({ content: line, bold: false });
-  return parts.map((p) => {
-    const obj = { type: 'text', text: { content: p.content } };
-    if (p.bold) obj.annotations = { bold: true };
-    return obj;
-  });
+  return parts.map((p) => { const obj = { type: 'text', text: { content: p.content } }; if (p.bold) obj.annotations = { bold: true }; return obj; });
 }
-
-// 뉴스 섹션 전용: (URL) 패턴을 기준으로 항목을 재구성한다.
-// 전체 텍스트의 줄바꿈을 먼저 모두 공백으로 합친 뒤,
-// "...문장. (URL)" 형태가 끝나는 지점마다 끊어서 각 뉴스 항목으로 만든다.
-// 이렇게 하면 모델이 한 뉴스를 여러 단락으로 나눠 써도 (URL) 기준으로 정확히 재조립된다.
 function normalizeNewsBody(cleanedBody) {
-  const flat = cleanedBody
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l && l !== '---')
-    .join(' ');
-
+  const flat = cleanedBody.split('\n').map((l) => l.trim()).filter((l) => l && l !== '---').join(' ');
   const urlEndRegex = /\(https?:\/\/[^\s)]+\)/g;
   const items = [];
   let lastIndex = 0;
@@ -426,19 +370,11 @@ function normalizeNewsBody(cleanedBody) {
     lastIndex = end;
   }
   const remainder = flat.slice(lastIndex).trim();
-  if (remainder) {
-    if (items.length > 0) items[items.length - 1] += ' ' + remainder;
-    else items.push(remainder);
-  }
-
+  if (remainder) { if (items.length > 0) items[items.length - 1] += ' ' + remainder; else items.push(remainder); }
   return items.filter(Boolean).join('\n---\n');
 }
-
-// 섹션 파싱 후 flat 블록 배열로 조립:
-//   [제목 paragraph] [본문 paragraph...] [divider] [제목 paragraph] ...
 function buildBriefingBlocks(rawText) {
   const text = rawText;
-
   const tokens = [
     { sub: '오늘 날씨입니다', official: '오늘 날씨입니다.' },
     { sub: '오늘 일정입니다', official: '오늘 일정입니다.' },
@@ -446,58 +382,32 @@ function buildBriefingBlocks(rawText) {
     { sub: '어제는 이런 하루를', official: '어제는 이런 하루를 보내셨네요.' },
     { sub: '오늘은 이렇게 해보는 게', official: '오늘은 이렇게 해보는 게 어떨까요?' }
   ];
-
   const positions = [];
-  tokens.forEach((t) => {
-    const pos = text.indexOf(t.sub);
-    if (pos !== -1) positions.push({ pos, token: t });
-  });
+  tokens.forEach((t) => { const pos = text.indexOf(t.sub); if (pos !== -1) positions.push({ pos, token: t }); });
   positions.sort((a, b) => a.pos - b.pos);
-
   const blocks = [];
-
   for (let i = 0; i < positions.length; i++) {
     if (i > 0) blocks.push(dividerBlock());
-
     const current = positions[i];
     const next = positions[i + 1];
     const startBody = current.pos + current.token.sub.length;
-
     let chunk = next ? text.slice(startBody, next.pos) : text.slice(startBody);
     let cleanedBody = chunk.trim();
-
-    if (current.token.sub === '어제는 이런 하루를' && cleanedBody.startsWith('보내셨네요')) {
-      cleanedBody = cleanedBody.slice('보내셨네요'.length).trim();
-    }
+    if (current.token.sub === '어제는 이런 하루를' && cleanedBody.startsWith('보내셨네요')) cleanedBody = cleanedBody.slice('보내셨네요'.length).trim();
     if (current.token.sub === '오늘은 이렇게 해보는 게') {
       if (cleanedBody.startsWith('어떨까요?')) cleanedBody = cleanedBody.slice('어떨까요?'.length).trim();
       else if (cleanedBody.startsWith('어떨까요')) cleanedBody = cleanedBody.slice('어떨까요'.length).trim();
     }
-
-    // 날씨 섹션: 모델이 줄바꿈을 넣어도 강제로 한 문단화
-    if (current.token.sub === '오늘 날씨입니다') {
-      cleanedBody = cleanedBody.split('\n').map((l) => l.trim()).filter(Boolean).join(' ');
-    }
-
-    // 뉴스 섹션: 뉴스1/뉴스2 각 항목 내부 줄바꿈을 강제로 한 줄화 (항목 간 구분은 유지)
-    if (current.token.sub === '오늘 뉴스입니다') {
-      cleanedBody = normalizeNewsBody(cleanedBody);
-    }
-
+    if (current.token.sub === '오늘 날씨입니다') cleanedBody = cleanedBody.split('\n').map((l) => l.trim()).filter(Boolean).join(' ');
+    if (current.token.sub === '오늘 뉴스입니다') cleanedBody = normalizeNewsBody(cleanedBody);
     blocks.push(titleParagraph(current.token.official));
-
     const lines = cleanedBody.split('\n');
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed) continue;
-      if (trimmed === '[SUGGEST2]' || trimmed === '---') {
-        blocks.push(emptyParagraph());
-        continue;
-      }
+      if (trimmed === '[SUGGEST2]' || trimmed === '---') { blocks.push(emptyParagraph()); continue; }
       blocks.push(bodyParagraph(trimmed));
     }
-
-    // 섹션 끝에 남은 trailing 빈 줄 제거 (구분선 위 공백 방지)
     while (blocks.length > 0) {
       const lastBlock = blocks[blocks.length - 1];
       const rt = lastBlock.type === 'paragraph' ? lastBlock.paragraph.rich_text : null;
@@ -506,7 +416,6 @@ function buildBriefingBlocks(rawText) {
       else break;
     }
   }
-
   return blocks.slice(0, 100);
 }
 
@@ -519,20 +428,11 @@ async function fetchTodayEvents(icsUrls, todayStr) {
       const res = await fetch(url);
       const icsText = await res.text();
       events.push(...parseIcsForDate(icsText, todayStr));
-    } catch (e) {
-      console.error('calendar fetch failed:', url, e);
-    }
+    } catch (e) { console.error('calendar fetch failed:', url, e); }
   }
-  // sortKey|isTimed|label 형식: 종일 일정(isTimed=0)이 먼저, 그 다음 시간순
-  events.sort((a, b) => {
-    const [aKey, aTimed] = a.split('|');
-    const [bKey, bTimed] = b.split('|');
-    if (aTimed !== bTimed) return aTimed.localeCompare(bTimed);
-    return aKey.localeCompare(bKey);
-  });
+  events.sort((a, b) => { const [aKey, aTimed] = a.split('|'); const [bKey, bTimed] = b.split('|'); if (aTimed !== bTimed) return aTimed.localeCompare(bTimed); return aKey.localeCompare(bKey); });
   return events.map((e) => e.split('|').slice(2).join('|')).join(', ');
 }
-
 function parseIcsForDate(icsText, todayStr) {
   const results = [];
   const veventBlocks = icsText.split('BEGIN:VEVENT').slice(1);
@@ -550,9 +450,8 @@ function parseIcsForDate(icsText, todayStr) {
     const rruleMatch = block.match(/RRULE:(.+)/);
     const exdates = [...block.matchAll(/EXDATE(?:;[^:\r\n]*)?:(\d{8})/g)].map((m) => m[1]);
     let occurs = false;
-    if (!rruleMatch) {
-      occurs = dateStr === todayStr.replace(/-/g, '');
-    } else {
+    if (!rruleMatch) occurs = dateStr === todayStr.replace(/-/g, '');
+    else {
       if (compareYMD(targetDate, eventStart) < 0) occurs = false;
       else if (exdates.includes(todayStr.replace(/-/g, ''))) occurs = false;
       else occurs = matchesRRule(rruleMatch[1], eventStart, targetDate);
@@ -568,19 +467,17 @@ function parseIcsForDate(icsText, todayStr) {
       timeLabel = `${String(hour).padStart(2, '0')}:${min}`;
       sortKey = timeLabel;
     } else {
-      // 하루 종일 이벤트: 시작일부터 오늘까지 며칠째인지 계산 (2일 이상일 때만 표기)
       const startDate = toDate(eventStart);
       const targetDateObj = toDate(targetDate);
       const dayNum = Math.round((targetDateObj - startDate) / 86400000) + 1;
       if (dayNum >= 2) dayInfo = ` (${dayNum}일차)`;
-      sortKey = '00:00'; // 하루 종일은 최우선 정렬
+      sortKey = '00:00';
     }
     const label = timeStr ? `${timeLabel} ${summary}` : `${timeLabel} ${summary}${dayInfo}`;
     results.push(`${sortKey}|${timeStr ? '1' : '0'}|${label}`);
   }
   return results;
 }
-
 function parseYMD(str) { const s = str.replace(/-/g, ''); return { y: parseInt(s.slice(0, 4), 10), m: parseInt(s.slice(4, 6), 10), d: parseInt(s.slice(6, 8), 10) }; }
 function compareYMD(a, b) { if (a.y !== b.y) return a.y - b.y; if (a.m !== b.m) return a.m - b.m; return a.d - b.d; }
 function toDate(ymd) { return new Date(ymd.y, ymd.m - 1, ymd.d); }
@@ -596,22 +493,9 @@ function matchesRRule(rrule, start, target) {
   if (dayDiff < 0) return false;
   switch (freq) {
     case 'DAILY': return dayDiff % interval === 0;
-    case 'WEEKLY': {
-      const weekDiff = Math.floor(dayDiff / 7);
-      if (weekDiff % interval !== 0) return false;
-      if (parts.BYDAY) { const dayMap = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA']; return parts.BYDAY.split(',').includes(dayMap[targetDate.getDay()]); }
-      return targetDate.getDay() === startDate.getDay();
-    }
-    case 'MONTHLY': {
-      if (target.d !== start.d) return false;
-      const monthDiff = (target.y - start.y) * 12 + (target.m - start.m);
-      return monthDiff >= 0 && monthDiff % interval === 0;
-    }
-    case 'YEARLY': {
-      if (target.m !== start.m || target.d !== start.d) return false;
-      const yearDiff = target.y - start.y;
-      return yearDiff >= 0 && yearDiff % interval === 0;
-    }
+    case 'WEEKLY': { const weekDiff = Math.floor(dayDiff / 7); if (weekDiff % interval !== 0) return false; if (parts.BYDAY) { const dayMap = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA']; return parts.BYDAY.split(',').includes(dayMap[targetDate.getDay()]); } return targetDate.getDay() === startDate.getDay(); }
+    case 'MONTHLY': { if (target.d !== start.d) return false; const monthDiff = (target.y - start.y) * 12 + (target.m - start.m); return monthDiff >= 0 && monthDiff % interval === 0; }
+    case 'YEARLY': { if (target.m !== start.m || target.d !== start.d) return false; const yearDiff = target.y - start.y; return yearDiff >= 0 && yearDiff % interval === 0; }
     default: return false;
   }
 }
