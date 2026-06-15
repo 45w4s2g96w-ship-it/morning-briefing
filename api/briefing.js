@@ -13,7 +13,7 @@ export default async function handler(req, res) {
 
 async function runBriefing() {
   const NOTION_TOKEN = process.env.NOTION_TOKEN;
-  const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY; 
+  const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
   const ICLOUD_CALENDAR_URLS = process.env.ICLOUD_CALENDAR_URLS;
 
   // ---- 날짜 계산 (KST 기준) ----
@@ -97,10 +97,10 @@ async function runBriefing() {
   const briefingResult = await callClaude(ANTHROPIC_API_KEY, systemPrompt, userPrompt);
   const briefingText = briefingResult.text || '(브리핑 생성 실패)';
 
-  // 0월 00일 0요일 모닝 브리핑 입니다. 대제목 생성[cite: 1]
-  const days = ['일', '월', '화', '수', '목', '금', '토'];[cite: 1]
-  const titleLabel = `${kstNow.getMonth() + 1}월 ${kstNow.getDate()}일 ${days[kstNow.getDay()]}요일 모닝 브리핑 입니다.`;[cite: 1]
-  
+  // [수정 1] 제목 포맷: "M월 D일 d요일 모닝 브리핑입니다." (띄어쓰기 없이 입니다.)
+  const days = ['일', '월', '화', '수', '목', '금', '토'];
+  const titleLabel = `${kstNow.getUTCMonth() + 1}월 ${kstNow.getUTCDate()}일 ${days[kstNow.getUTCDay()]}요일 모닝 브리핑입니다.`;
+
   const newBlocks = buildBriefingBlocks(briefingText);
 
   let existingPageId = null;
@@ -119,7 +119,7 @@ async function runBriefing() {
   let pageResult;
   if (existingPageId) {
     try {
-      // 🌟 [복구 핵심] 중복 실행 시 기존 페이지의 상단 대제목 프로퍼티도 확실하게 강제 업데이트
+      // [수정 1] 기존 페이지 제목도 정확한 포맷으로 강제 업데이트
       await fetch(`https://api.notion.com/v1/pages/${existingPageId}`, {
         method: 'PATCH',
         headers: notionHeaders(NOTION_TOKEN),
@@ -155,7 +155,11 @@ async function runBriefing() {
       headers: notionHeaders(NOTION_TOKEN),
       body: JSON.stringify({
         parent: { database_id: MORNING_BRIEFING_DB },
-        properties: { '제목': { title: [{ text: { content: titleLabel } }] }, '날짜': { date: { start: todayStr } } },
+        // [수정 1] 신규 생성 시에도 정확한 포맷으로 제목 설정
+        properties: {
+          '제목': { title: [{ text: { content: titleLabel } }] },
+          '날짜': { date: { start: todayStr } }
+        },
         children: newBlocks,
       }),
     });
@@ -203,7 +207,10 @@ function getRichText(prop) { if (!prop) return ''; if (prop.rich_text) return pr
 
 const WEATHER_EMOJI_MAP = { '맑음': '☀️', '구름조금': '🌤️', '흐림': '☁️', '비': '🌧️', '눈': '❄️', '천둥번개': '⛈️', '안개': '🌫️' };
 
-// 🌟 [서식 고정 핵심] 노션의 서식 전염 버그를 파괴하고 원래 양식대로 출력하는 인라인 파서
+// [수정 2] 콜아웃 블록 조립 전면 개조:
+//   - callout.rich_text → 소제목(볼드+밑줄)만 단독 배치
+//   - 본문은 callout.children 배열 내 paragraph 블록으로 분리
+//   - 뉴스 구분선(---) → children 내부 진짜 divider 블록으로 치환
 function buildBriefingBlocks(rawText) {
   const weatherMatch = rawText.match(/^\[WEATHER:([^\]]+)\]\s*\n?/);
   const weatherKey = weatherMatch ? weatherMatch[1].trim() : '';
@@ -220,7 +227,7 @@ function buildBriefingBlocks(rawText) {
 
   let positions = [];
   tokens.forEach((t) => {
-    let pos = text.indexOf(t.sub);
+    const pos = text.indexOf(t.sub);
     if (pos !== -1) positions.push({ pos, token: t });
   });
   positions.sort((a, b) => a.pos - b.pos);
@@ -228,10 +235,10 @@ function buildBriefingBlocks(rawText) {
   const blocks = [];
 
   for (let i = 0; i < positions.length; i++) {
-    let current = positions[i];
-    let next = positions[i + 1];
-    let startBody = current.pos + current.token.sub.length;
-    
+    const current = positions[i];
+    const next = positions[i + 1];
+    const startBody = current.pos + current.token.sub.length;
+
     let chunk = next ? text.slice(startBody, next.pos) : text.slice(startBody);
     let cleanedBody = chunk.trim();
 
@@ -242,14 +249,21 @@ function buildBriefingBlocks(rawText) {
       cleanedBody = cleanedBody.slice('어떨까요?'.length).trim();
     }
 
+    // [수정 2] callout.rich_text에는 소제목만, 본문은 children으로 분리
     blocks.push({
       object: 'block',
       type: 'callout',
       callout: {
-        // 하위 자식을 쓰지 않고 하나의 rich_text 배열 안에서 독립된 토큰 단위로 밀어 넣어 밑줄 번짐 방지
-        rich_text: buildFlatCalloutRichText(current.token.official, cleanedBody),
+        rich_text: [
+          {
+            type: 'text',
+            text: { content: current.token.official },
+            annotations: { bold: true, underline: true }
+          }
+        ],
         icon: { type: 'emoji', emoji: current.token.icon },
-        color: 'default'
+        color: 'default',
+        children: buildBodyChildren(cleanedBody)
       }
     });
   }
@@ -267,77 +281,73 @@ function buildBriefingBlocks(rawText) {
   return blocks.slice(0, 100);
 }
 
-function splitBoldMarkdown(line, extraAnnotations) {
-  const parts = []; const regex = /\*\*(.+?)\*\*/g; let lastIndex = 0; let m;
+// [수정 2] 본문 줄들을 children 배열(paragraph / divider 블록)로 변환
+function buildBodyChildren(body) {
+  const children = [];
+  const lines = body.split('\n');
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    // 뉴스 구분선 → 진짜 노션 divider 블록
+    if (trimmed === '---') {
+      children.push({ object: 'block', type: 'divider', divider: {} });
+      continue;
+    }
+
+    // 일반 줄 → paragraph 블록 (마크다운 볼드 + 이모지 볼드 처리 포함)
+    children.push({
+      object: 'block',
+      type: 'paragraph',
+      paragraph: {
+        rich_text: buildLineRichText(trimmed)
+      }
+    });
+  }
+
+  return children.slice(0, 99); // 노션 children 최대 100개 (callout 자체 포함)
+}
+
+// 한 줄을 rich_text 배열로 변환 (🏃/💭 볼드 + **..** 마크다운 볼드)
+function buildLineRichText(line) {
+  const richText = [];
+  let currentLine = line;
+
+  const emojiMatch = currentLine.match(/^(🏃|💭)(\s*)/);
+  if (emojiMatch) {
+    richText.push({ type: 'text', text: { content: emojiMatch[1] }, annotations: { bold: true } });
+    if (emojiMatch[2]) richText.push({ type: 'text', text: { content: emojiMatch[2] } });
+    currentLine = currentLine.slice(emojiMatch[0].length);
+  }
+
+  richText.push(...splitBoldMarkdown(currentLine));
+  return richText;
+}
+
+function splitBoldMarkdown(line) {
+  const parts = [];
+  const regex = /\*\*(.+?)\*\*/g;
+  let lastIndex = 0;
+  let m;
   while ((m = regex.exec(line)) !== null) {
     if (m.index > lastIndex) parts.push({ content: line.slice(lastIndex, m.index), bold: false });
-    parts.push({ content: m[1], bold: true }); lastIndex = m.index + m[0].length;
+    parts.push({ content: m[1], bold: true });
+    lastIndex = m.index + m[0].length;
   }
   if (lastIndex < line.length) parts.push({ content: line.slice(lastIndex), bold: false });
   if (parts.length === 0) parts.push({ content: line, bold: false });
+
   return parts.map((p) => {
-    const annotations = {}; if (p.bold) annotations.bold = true;
-    if (extraAnnotations) Object.assign(annotations, extraAnnotations);
     const obj = { type: 'text', text: { content: p.content } };
-    if (Object.keys(annotations).length > 0) obj.annotations = annotations;
+    if (p.bold) obj.annotations = { bold: true };
     return obj;
   });
 }
 
-// 🌟 [핵심 변경 함수] 한 배열 안에서 개별 오브젝트 단위로 서식을 끊어서 매핑하는 클린 양식 빌더
-function buildFlatCalloutRichText(header, body) {
-  const richText = [];
-  
-  // 1. 소제목 박기 (여기에만 볼드 + 밑줄 선언)
-  richText.push({
-    type: 'text',
-    text: { content: header },
-    annotations: { bold: true, underline: true }
-  });
-  
-  // 2. 제목 직후 강제 줄바꿈 주입 (서식 무첨가로 서식 전염 차단)
-  richText.push({
-    type: 'text',
-    text: { content: '\n' }
-  });
-  
-  // 3. 본문 조립 시작
-  const lines = body.split('\n');
-  let isFirstLine = true;
-  
-  lines.forEach((line) => {
-    let currentLine = line.trim();
-    if (!currentLine) return;
-    
-    // 중간 뉴스구분선 서식
-    if (currentLine === '---') {
-      richText.push({ type: 'text', text: { content: '\n─────────────\n' } });
-      isFirstLine = true;
-      return;
-    }
-    
-    if (!isFirstLine) {
-      richText.push({ type: 'text', text: { content: '\n' } });
-    }
-    
-    // 🏃, 💭 특수 이모지 볼드 처리
-    const emojiMatch = currentLine.match(/^(🏃|💭)(\s*)/);
-    if (emojiMatch) {
-      richText.push({ type: 'text', text: { content: emojiMatch[1] }, annotations: { bold: true } });
-      currentLine = currentLine.slice(emojiMatch[0].length);
-      richText.push({ type: 'text', text: { content: emojiMatch[2] || ' ' } });
-    }
-    
-    // 나머지 본문 마크다운 볼드 분리 파싱
-    richText.push(...splitBoldMarkdown(currentLine, null));
-    isFirstLine = false;
-  });
-  
-  return richText;
-}
-
 function textLinesToParagraphBlocks(text) {
-  const lines = text.split('\n'); const blocks = [];
+  const lines = text.split('\n');
+  const blocks = [];
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -359,34 +369,82 @@ function buildScriptText(text) {
   const lines = script.split('\n');
   const cleanedLines = lines.map((line) => {
     if (line.trim() === '---') return '';
-    return line.replace(/\*\*(.+?)\*\*/g, '$1').replace(/\(https?:\/\/[^)]+\)\s*$/g, '').replace(/https?:\/\/\S+/g, '').replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '').trim();
+    return line
+      .replace(/\*\*(.+?)\*\*/g, '$1')
+      .replace(/\(https?:\/\/[^)]+\)\s*$/g, '')
+      .replace(/https?:\/\/\S+/g, '')
+      .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '')
+      .trim();
   });
-  const paragraphs = []; let current = [];
+
+  const paragraphs = [];
+  let current = [];
   for (const line of cleanedLines) {
-    if (line === '') { if (current.length > 0) { paragraphs.push(current.join(' ')); current = []; } continue; }
+    if (line === '') {
+      if (current.length > 0) { paragraphs.push(current.join(' ')); current = []; }
+      continue;
+    }
     current.push(line);
   }
-  if (current.length > 0) paragraphs.push(current.join(' ')); return paragraphs.join('\n\n').trim();
+  if (current.length > 0) paragraphs.push(current.join(' '));
+  return paragraphs.join('\n\n').trim();
 }
 
 async function fetchTodayEvents(icsUrls, todayStr) {
   if (!icsUrls) return '';
-  const urls = icsUrls.split(',').map((u) => u.trim()).filter(Boolean); const events = [];
-  for (const url of urls) { try { const res = await fetch(url); const icsText = await res.text(); events.push(...parseIcsForDate(icsText, todayStr)); } catch (e) { console.error('calendar fetch failed:', url, e); } }
-  events.sort(); return events.map((e) => e.replace(/^\S+\|/, '')).join(', ');
+  const urls = icsUrls.split(',').map((u) => u.trim()).filter(Boolean);
+  const events = [];
+  for (const url of urls) {
+    try {
+      const res = await fetch(url);
+      const icsText = await res.text();
+      events.push(...parseIcsForDate(icsText, todayStr));
+    } catch (e) {
+      console.error('calendar fetch failed:', url, e);
+    }
+  }
+  events.sort();
+  return events.map((e) => e.replace(/^\S+\|/, '')).join(', ');
 }
 
 function parseIcsForDate(icsText, todayStr) {
-  const results = []; const veventBlocks = icsText.split('BEGIN:VEVENT').slice(1); const targetDate = parseYMD(todayStr);
+  const results = [];
+  const veventBlocks = icsText.split('BEGIN:VEVENT').slice(1);
+  const targetDate = parseYMD(todayStr);
   for (const rawBlock of veventBlocks) {
-    const block = rawBlock.split('END:VEVENT')[0]; const summaryMatch = block.match(/SUMMARY:(.+)/); const dtStartMatch = block.match(/DTSTART(?:;[^:\r\n]*)?:(\d{8})(T(\d{6}))?(Z)?/);
+    const block = rawBlock.split('END:VEVENT')[0];
+    const summaryMatch = block.match(/SUMMARY:(.+)/);
+    const dtStartMatch = block.match(/DTSTART(?:;[^:\r\n]*)?:(\d{8})(T(\d{6}))?(Z)?/);
     if (!summaryMatch || !dtStartMatch) continue;
-    const summary = summaryMatch[1].trim(); const dateStr = dtStartMatch[1]; const timeStr = dtStartMatch[3]; const isUTC = !!dtStartMatch[4]; const eventStart = parseYMD(dateStr); const rruleMatch = block.match(/RRULE:(.+)/); const exdates = [...block.matchAll(/EXDATE(?:;[^:\r\n]*)?:(\d{8})/g)].map((m) => m[1]);
+    const summary = summaryMatch[1].trim();
+    const dateStr = dtStartMatch[1];
+    const timeStr = dtStartMatch[3];
+    const isUTC = !!dtStartMatch[4];
+    const eventStart = parseYMD(dateStr);
+    const rruleMatch = block.match(/RRULE:(.+)/);
+    const exdates = [...block.matchAll(/EXDATE(?:;[^:\r\n]*)?:(\d{8})/g)].map((m) => m[1]);
     let occurs = false;
-    if (!rruleMatch) { occurs = dateStr === todayStr.replace(/-/g, ''); } else { if (compareYMD(targetDate, eventStart) < 0) { occurs = false; } else if (exdates.includes(todayStr.replace(/-/g, ''))) { occurs = false; } else { occurs = matchesRRule(rruleMatch[1], eventStart, targetDate); } }
+    if (!rruleMatch) {
+      occurs = dateStr === todayStr.replace(/-/g, '');
+    } else {
+      if (compareYMD(targetDate, eventStart) < 0) {
+        occurs = false;
+      } else if (exdates.includes(todayStr.replace(/-/g, ''))) {
+        occurs = false;
+      } else {
+        occurs = matchesRRule(rruleMatch[1], eventStart, targetDate);
+      }
+    }
     if (!occurs) continue;
-    let timeLabel = '하루 종일'; let sortKey = '99:99';
-    if (timeStr) { let hour = parseInt(timeStr.slice(0, 2), 10); const min = timeStr.slice(2, 4); if (isUTC) hour = (hour + 9) % 24; timeLabel = `${String(hour).padStart(2, '0')}:${min}`; sortKey = timeLabel; }
+    let timeLabel = '하루 종일';
+    let sortKey = '99:99';
+    if (timeStr) {
+      let hour = parseInt(timeStr.slice(0, 2), 10);
+      const min = timeStr.slice(2, 4);
+      if (isUTC) hour = (hour + 9) % 24;
+      timeLabel = `${String(hour).padStart(2, '0')}:${min}`;
+      sortKey = timeLabel;
+    }
     results.push(`${sortKey}|${timeLabel} ${summary}`);
   }
   return results;
@@ -396,15 +454,33 @@ function parseYMD(str) { const s = str.replace(/-/g, ''); return { y: parseInt(s
 function compareYMD(a, b) { if (a.y !== b.y) return a.y - b.y; if (a.m !== b.m) return a.m - b.m; return a.d - b.d; }
 function toDate(ymd) { return new Date(ymd.y, ymd.m - 1, ymd.d); }
 function matchesRRule(rrule, start, target) {
-  const parts = {}; for (const kv of rrule.split(';')) { const [k, v] = kv.split('='); parts[k] = v; }
-  const freq = parts.FREQ; const interval = parseInt(parts.INTERVAL || '1', 10);
+  const parts = {};
+  for (const kv of rrule.split(';')) { const [k, v] = kv.split('='); parts[k] = v; }
+  const freq = parts.FREQ;
+  const interval = parseInt(parts.INTERVAL || '1', 10);
   if (parts.UNTIL) { const until = parseYMD(parts.UNTIL.slice(0, 8)); if (compareYMD(target, until) > 0) return false; }
-  const startDate = toDate(start); const targetDate = toDate(target); const dayDiff = Math.round((targetDate - startDate) / 86400000); if (dayDiff < 0) return false;
+  const startDate = toDate(start);
+  const targetDate = toDate(target);
+  const dayDiff = Math.round((targetDate - startDate) / 86400000);
+  if (dayDiff < 0) return false;
   switch (freq) {
     case 'DAILY': return dayDiff % interval === 0;
-    case 'WEEKLY': { const weekDiff = Math.floor(dayDiff / 7); if (weekDiff % interval !== 0) return false; if (parts.BYDAY) { const dayMap = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA']; return parts.BYDAY.split(',').includes(dayMap[targetDate.getDay()]); } return targetDate.getDay() === startDate.getDay(); }
-    case 'MONTHLY': { if (target.d !== start.d) return false; const monthDiff = (target.y - start.y) * 12 + (target.m - start.m); return monthDiff >= 0 && monthDiff % interval === 0; }
-    case 'YEARLY': { if (target.m !== start.m || target.d !== start.d) return false; const yearDiff = target.y - start.y; return yearDiff >= 0 && yearDiff % interval === 0; }
+    case 'WEEKLY': {
+      const weekDiff = Math.floor(dayDiff / 7);
+      if (weekDiff % interval !== 0) return false;
+      if (parts.BYDAY) { const dayMap = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA']; return parts.BYDAY.split(',').includes(dayMap[targetDate.getDay()]); }
+      return targetDate.getDay() === startDate.getDay();
+    }
+    case 'MONTHLY': {
+      if (target.d !== start.d) return false;
+      const monthDiff = (target.y - start.y) * 12 + (target.m - start.m);
+      return monthDiff >= 0 && monthDiff % interval === 0;
+    }
+    case 'YEARLY': {
+      if (target.m !== start.m || target.d !== start.d) return false;
+      const yearDiff = target.y - start.y;
+      return yearDiff >= 0 && yearDiff % interval === 0;
+    }
     default: return false;
   }
 }
