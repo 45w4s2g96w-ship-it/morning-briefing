@@ -157,24 +157,46 @@ async function runBriefing() {
 
 async function callGemini(apiKey, systemPrompt, userPrompt) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-        contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-        generationConfig: { temperature: 0.7, maxOutputTokens: 3000 }
-      })
-    });
-    const data = await res.json();
-    if (!res.ok || data.error) return { text: '', debug: { stage: 'gemini_error', raw: data } };
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    const idx = text.indexOf('[WEATHER:');
-    const finalText = idx >= 0 ? text.slice(idx) : text;
-    return { text: finalText.trim(), debug: null };
-  } catch (error) {
-    return { text: '', debug: { stage: 'gemini_fetch_exception', error: String(error) } };
+  
+  const maxRetries = 3; // 최대 3번 재시도
+  let delay = 2000;     // 에러 발생 시 2초 대기
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+          contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+          generationConfig: { temperature: 0.7, maxOutputTokens: 3000 }
+        })
+      });
+
+      const data = await res.json();
+
+      // 만약 503 에러가 나면 2초 쉬고 다음 루프로 넘어가서 다시 시도함
+      if (res.status === 503 && attempt < maxRetries) {
+        console.warn(`[Gemini 503 에러 발생] ${attempt}번째 실패. ${delay/1000}초 후 다시 시도합니다...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue; 
+      }
+
+      if (!res.ok || data.error) return { text: '', debug: { stage: 'gemini_error', raw: data } };
+
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      const idx = text.indexOf('[WEATHER:');
+      const finalText = idx >= 0 ? text.slice(idx) : text;
+
+      return { text: finalText.trim(), debug: null };
+
+    } catch (error) {
+      if (attempt < maxRetries) {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+      return { text: '', debug: { stage: 'gemini_fetch_exception', error: String(error) } };
+    }
   }
 }
 
