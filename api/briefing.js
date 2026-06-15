@@ -65,14 +65,14 @@ async function runBriefing() {
 
 형식 (섹션 헤더는 반드시 아래 텍스트 그대로 써):
 오늘 날씨입니다
-(서울의 아침 날씨, 기온(섭씨), 외출 참고사항과 함께 따뜻하고 밝은 인사를 자연스러운 문장으로.)
+(첫 줄은 반드시 "오늘도 좋은 하루의 시작이에요, 민영 씨." 로 시작. 이어서 서울의 아침 날씨, 기온(섭씨), 외출 참고사항을 자연스러운 문장으로.)
 
 오늘 일정입니다
 (오늘 일정을 자연스러운 문장으로 풀어서. 일정 없으면 "등록된 일정이 없습니다.")
 
 오늘 뉴스입니다
-(뉴스 1 본문. 국내외 정치·사회·경제 시사 이슈 중 오늘의 주요 뉴스 하나를 한두 문장으로. 문장 끝에 기사 URL을 괄호로, 하이퍼링크로 연결.)
-(뉴스 2 본문. 위와 다른 주제의 주요 시사 뉴스 하나를 한두 문장으로. 반드시 작성해야 해. 문장 끝에 기사 URL을 괄호로, 하이퍼링크로 연결.)
+(뉴스 1 본문. 국내외 정치·사회·경제 시사 이슈 중 오늘의 주요 뉴스 하나를 한두 문장으로. 문장 끝에 (언론사명) 형태로 출처를 표기하고, 그 언론사명에 기사 URL을 마크다운 링크 [언론사명](URL) 형식으로 연결.)
+(뉴스 2 본문. 위와 다른 주제의 주요 시사 뉴스 하나를 한두 문장으로. 반드시 작성해야 해. 동일하게 [언론사명](URL) 형식으로 출처 연결.)
 
 어제는 이런 하루를 보내셨네요
 (어제 일기 요약 1~2줄.)
@@ -85,6 +85,7 @@ async function runBriefing() {
 - 일기 요약은 격려 내용을 무조건 1줄 이상 포함
 - 기온은 섭씨(℃)만.
 - 뉴스는 반드시 web_search로 오늘 또는 최근 실제 기사를 찾아서 작성. 조중동(조선일보/중앙일보/동아일보) 제외.
+- 뉴스 출처는 반드시 [언론사명](실제 기사 URL) 마크다운 링크 형식으로만 표기. (URL) 단독 표기 금지.
 - 이모지 전체 출력에서 절대 사용 금지.
 - 섹션 헤더 외 설명 문구 추가 금지. 출력은 위 형식 그대로만.`;
 
@@ -235,25 +236,43 @@ function bodyParagraph(line) {
   };
 }
 
-// 1) 줄 끝의 (https://...) 패턴을 찾아 직전 텍스트에 링크 적용
-// 2) **bold** 마크다운 처리
+// [텍스트](url) 마크다운 링크, **bold**, 줄 끝 단독 (url) 패턴을 모두 처리
 function splitRichText(line) {
-  const urlMatch = line.match(/^(.*)\((https?:\/\/[^\s)]+)\)\s*$/);
-  let mainText = line;
-  let linkUrl = null;
-  if (urlMatch) {
-    mainText = urlMatch[1].trim();
-    linkUrl = urlMatch[2];
+  // 줄 끝 단독 (https://...) 패턴 fallback (혹시 모델이 옛 형식으로 출력한 경우)
+  const trailingUrlMatch = line.match(/^(.*)\((https?:\/\/[^\s)]+)\)\s*$/);
+  if (trailingUrlMatch && !line.includes('](')) {
+    const mainText = trailingUrlMatch[1].trim();
+    const linkUrl = trailingUrlMatch[2];
+    const parts = splitBoldMarkdown(mainText);
+    if (parts.length > 0) parts[parts.length - 1].text.link = { url: linkUrl };
+    return parts;
   }
 
-  const parts = splitBoldMarkdown(mainText);
-
-  if (linkUrl && parts.length > 0) {
-    const last = parts[parts.length - 1];
-    last.text.link = { url: linkUrl };
+  // [텍스트](url) 마크다운 링크 + **bold** 토큰화
+  const parts = [];
+  const regex = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|\*\*(.+?)\*\*/g;
+  let lastIndex = 0;
+  let m;
+  while ((m = regex.exec(line)) !== null) {
+    if (m.index > lastIndex) parts.push({ content: line.slice(lastIndex, m.index), bold: false, link: null });
+    if (m[1] !== undefined) {
+      // [텍스트](url)
+      parts.push({ content: m[1], bold: false, link: m[2] });
+    } else {
+      // **bold**
+      parts.push({ content: m[3], bold: true, link: null });
+    }
+    lastIndex = m.index + m[0].length;
   }
+  if (lastIndex < line.length) parts.push({ content: line.slice(lastIndex), bold: false, link: null });
+  if (parts.length === 0) parts.push({ content: line, bold: false, link: null });
 
-  return parts;
+  return parts.map((p) => {
+    const obj = { type: 'text', text: { content: p.content } };
+    if (p.bold) obj.annotations = { bold: true };
+    if (p.link) obj.text.link = { url: p.link };
+    return obj;
+  });
 }
 
 function splitBoldMarkdown(line) {
@@ -327,6 +346,14 @@ function buildBriefingBlocks(rawText) {
       }
       blocks.push(bodyParagraph(trimmed));
     }
+
+    // 섹션 끝에 남은 trailing 빈 줄 제거 (구분선 위 공백 방지)
+    while (blocks.length > 0) {
+      const lastBlock = blocks[blocks.length - 1];
+      const isEmpty = lastBlock.type === 'paragraph' && lastBlock.paragraph.rich_text.length === 0;
+      if (isEmpty) blocks.pop();
+      else break;
+    }
   }
 
   // 스크립트 토글
@@ -370,6 +397,7 @@ function buildScriptText(text) {
   for (const line of script.split('\n')) {
     const trimmed = line
       .replace(/\[SUGGEST2\]/g, '')
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '$1')
       .replace(/\*\*(.+?)\*\*/g, '$1')
       .replace(/\(https?:\/\/[^)]+\)\s*$/g, '')
       .replace(/https?:\/\/\S+/g, '')
