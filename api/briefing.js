@@ -16,6 +16,7 @@ async function runBriefing() {
   const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
   const ICLOUD_CALENDAR_URLS = process.env.ICLOUD_CALENDAR_URLS;
 
+  // ---- 날짜 계산 (KST 기준) ----
   const now = new Date();
   const kstNow = new Date(now.getTime() + 9 * 60 * 60 * 1000);
   const todayStr = kstNow.toISOString().slice(0, 10);
@@ -23,6 +24,7 @@ async function runBriefing() {
   yesterday.setUTCDate(yesterday.getUTCDate() - 1);
   const yesterdayStr = yesterday.toISOString().slice(0, 10);
 
+  // ---- 1. 오늘 일정 조회 (iCloud 캘린더) ----
   let todaySchedule = '';
   try {
     todaySchedule = await fetchTodayEvents(ICLOUD_CALENDAR_URLS, todayStr);
@@ -30,6 +32,7 @@ async function runBriefing() {
     console.error('calendar fetch failed', e);
   }
 
+  // ---- 2. 어제 다이어리 페이지 조회 ----
   let diarySummary = '';
   let diaryEncourage = '';
   let diarySuggest = '';
@@ -51,8 +54,8 @@ async function runBriefing() {
     console.error('diary fetch failed', e);
   }
 
-  // 프롬프트 수정: 뉴스를 2개 생성하고 사이에 "---"를 넣도록 명시
-  const systemPrompt = `너는 사용자(민영)의 아침 브리핑을 작성하는 도우미야. 다음 형식을 정확히 지켜서 한국어로 작성해. 전체적으로 친절하고 전문적인 느낌이되, 존댓말이면서 아주 약간 캐주얼한 톤으로. 괄호나 기호 나열처럼 읽기 어색한 표현은 피해.
+  // ---- 3. Gemini API 호출 ----
+  const systemPrompt = `너는 사용자(민영)의 아침 브리핑을 작성하는 도우미야. 다음 형식을 정확히 지켜서 한국어로 작성해. 전체적으로 친절하고 전문적인 느낌이되, 존댓말이면서 아주 약간 캐주얼한 톤으로. 나중에 음성으로 그대로 읽힐 글이라는 걸 염두에 두고, 괄호나 기호 나열처럼 읽기 어색한 표현은 피해.
 
 형식 (각 섹션은 빈 줄로 구분):
 [WEATHER:날씨상태]
@@ -79,7 +82,7 @@ async function runBriefing() {
 규칙:
 - 첫 줄은 반드시 "[WEATHER:날씨상태]" 형식으로 시작해. 날씨상태는 다음 중 하나만 골라 써야 해: 맑음, 구름조금, 흐림, 비, 눈, 천둥번개, 안개. 이 줄에는 이모지나 다른 텍스트를 절대 넣지 마.
 - 기온은 반드시 섭씨(℃) 기준으로만 표기해.
-- "오늘 일정" 섹션은 아래 제공되는 일정 목록을 자연스러운 문장으로 풀어서 작성해.
+- "오늘 일정" 섹션은 아래 제공되는 일정 목록을 그대로 나열하지 말고, 자연스러운 문장으로 풀어서 작성해.
 - 각 섹션 헤더는 이모지 없이 위에 적힌 텍스트 그대로 써.
 - 마지막 섹션의 🏃 줄과 💭 줄은 "행동:" "사고:" 같은 라벨을 쓰지 말고 이모지 바로 뒤에 내용으로 시작해.
 - [WEATHER:날씨상태] 줄 이후에는 다른 어떤 줄에도 이모지를 쓰지 마 (🏃, 💭 제외).
@@ -94,7 +97,10 @@ async function runBriefing() {
   const briefingResult = await callGemini(GEMINI_API_KEY, systemPrompt, userPrompt);
   const briefingText = briefingResult.text || '(브리핑 생성 실패)';
 
-  const titleLabel = formatDateKRWithDay(new Date(todayStr + 'T00:00:00'));
+  // 0월 00일 0요일 모닝 브리핑 입니다. 형태로 대제목 생성 규칙 변경 [source: 1]
+  const days = ['일', '월', '화', '수', '목', '금', '토']; [source: 1]
+  const titleLabel = `${kstNow.getMonth() + 1}월 ${kstNow.getDate()}일 ${days[kstNow.getDay()]}요일 모닝 브리핑 입니다.`; [source: 1]
+  
   const newBlocks = buildBriefingBlocks(briefingText);
 
   let existingPageId = null;
@@ -174,47 +180,74 @@ async function callGemini(apiKey, systemPrompt, userPrompt) {
 
 function notionHeaders(token) { return { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'Notion-Version': '2022-06-28' }; }
 function getRichText(prop) { if (!prop) return ''; if (prop.rich_text) return prop.rich_text.map((t) => t.plain_text).join(''); if (prop.title) return prop.title.map((t) => t.plain_text).join(''); return ''; }
-function formatDateKRWithDay(d) { const days = ['일', '월', '화', '수', '목', '금', '토']; return `${d.getFullYear()}년 ${d.getMonth() + 1}월 ${d.getDate()}일 ${days[d.getDay()]}요일`; }
 
 const WEATHER_EMOJI_MAP = { '맑음': '☀️', '구름조금': '🌤️', '흐림': '☁️', '비': '🌧️', '눈': '❄️', '천둥번개': '⛈️', '안개': '🌫️' };
 
+// 🌟 [핵심 수정] 글이 한 줄로 뭉쳐 나와도 완벽히 분리해내는 토큰 파서
 function buildBriefingBlocks(rawText) {
   const weatherMatch = rawText.match(/^\[WEATHER:([^\]]+)\]\s*\n?/);
   const weatherKey = weatherMatch ? weatherMatch[1].trim() : '';
   const weatherEmoji = WEATHER_EMOJI_MAP[weatherKey] || '🌤️';
   const text = weatherMatch ? rawText.slice(weatherMatch[0].length) : rawText;
-  const lines = text.split('\n');
+
+  // 감지할 핵심 헤더 토큰 정의
+  const tokens = [
+    { sub: '오늘 날씨입니다', icon: weatherEmoji, official: '오늘 날씨입니다' },
+    { sub: '오늘 일정입니다', icon: '📅', official: '오늘 일정입니다' },
+    { sub: '오늘 뉴스입니다', icon: '📰', official: '오늘 뉴스입니다' },
+    { sub: '어제는 이런 하루를', icon: '☺️', official: '어제는 이런 하루를 보내셨네요' },
+    { sub: '오늘은 이렇게 해보는 게', icon: '😉', official: '오늘은 이렇게 해보는 게 어떨까요?' }
+  ];
+
+  let positions = [];
+  tokens.forEach((t) => {
+    let pos = text.indexOf(t.sub);
+    if (pos !== -1) {
+      positions.push({ pos, token: t });
+    }
+  });
+  positions.sort((a, b) => a.pos - b.pos);
+
   const blocks = [];
-  const sectionHeaderPatterns = [ { re: /^오늘 날씨입니다/, icon: weatherEmoji }, { re: /^오늘 일정입니다/, icon: '📅' }, { re: /^오늘 뉴스입니다/, icon: '📰' }, { re: /^어제는 이런 하루를/, icon: '☺️' } ];
-  let currentSection = null; 
-  
-  function flushSection() {
-    if (!currentSection) return;
-    const richTextLines = buildRichTextLinesForCallout(currentSection.lines);
-    blocks.push({ object: 'block', type: 'callout', callout: { rich_text: richTextLines, icon: { type: 'emoji', emoji: currentSection.icon || '💬' }, color: 'default' } });
-    currentSection = null;
-  }
-  
-  for (const line of lines) {
-    if (line.trim().length === 0) { 
-      if (currentSection) currentSection.lines.push(''); 
-      continue; 
-    }
-    const isLastSectionHeader = /오늘.*이렇게.*해보는.*게/.test(line);
-    const headerMatch = isLastSectionHeader ? { icon: '😉' } : sectionHeaderPatterns.find((p) => p.re.test(line));
+
+  for (let i = 0; i < positions.length; i++) {
+    let current = positions[i];
+    let next = positions[i + 1];
+    let startBody = current.pos + current.token.sub.length;
     
-    if (headerMatch || isLastSectionHeader) { 
-      flushSection(); 
-      currentSection = { icon: headerMatch ? headerMatch.icon : '😉', lines: [line] }; 
-      continue; 
+    let chunk = next ? text.slice(startBody, next.pos) : text.slice(startBody);
+    let cleanedBody = chunk.trim();
+
+    // 혹시 매칭되고 남은 잔여 텍스트 찌꺼기 제거
+    if (current.token.sub === '어제는 이런 하루를' && cleanedBody.startsWith('보내셨네요')) {
+      cleanedBody = cleanedBody.slice('보내셨네요'.length).trim();
     }
-    if (!currentSection) currentSection = { icon: '💬', lines: [] };
-    currentSection.lines.push(line);
+    if (current.token.sub === '오늘은 이렇게 해보는 게' && cleanedBody.startsWith('어떨까요?')) {
+      cleanedBody = cleanedBody.slice('어떨까요?'.length).trim();
+    }
+
+    blocks.push({
+      object: 'block',
+      type: 'callout',
+      callout: {
+        rich_text: buildCalloutRichText(current.token.official, cleanedBody),
+        icon: { type: 'emoji', emoji: current.token.icon },
+        color: 'default'
+      }
+    });
   }
-  flushSection();
-  
+
+  // 하단 스크립트 접기 블록
   const scriptText = buildScriptText(text);
-  blocks.push({ object: 'block', type: 'toggle', toggle: { rich_text: [{ type: 'text', text: { content: '스크립트' } }], children: textLinesToParagraphBlocks(scriptText) } });
+  blocks.push({
+    object: 'block',
+    type: 'toggle',
+    toggle: {
+      rich_text: [{ type: 'text', text: { content: '스크립트' } }],
+      children: textLinesToParagraphBlocks(scriptText)
+    }
+  });
+
   return blocks.slice(0, 100);
 }
 
@@ -235,46 +268,49 @@ function splitBoldMarkdown(line, extraAnnotations) {
   });
 }
 
-// 줄바꿈 매핑 수정 파트 (제목과 본문을 엄격히 구분하여 엔터 유지)
-function buildRichTextLinesForCallout(lines) {
-  if (!lines || lines.length === 0) return [];
+// 🌟 [가장 중요] 헤더와 본문을 분리하고 내부 줄바꿈(\n\n) 및 특수 기호를 살리는 서식 빌더
+function buildCalloutRichText(header, body) {
   const richText = [];
   
-  // 1. 첫 줄은 무조건 대분류 제목(헤더): 볼드 + 밑줄 처리
-  const headerLine = lines[0];
-  richText.push(...splitBoldMarkdown(headerLine, { bold: true, underline: true }));
+  // 1. 대제목 헤더 박기 (볼드 + 밑줄)
+  richText.push({
+    type: 'text',
+    text: { content: header },
+    annotations: { bold: true, underline: true }
+  });
+  
+  // 헤더 아래 본문 시작 전 간격 확보
+  richText.push({ type: 'text', text: { content: '\n\n' } });
+  
+  // 2. 본문 분리 매핑 (제미나이가 준 엔터값 유지 및 뉴스 구분선 처리)
+  const lines = body.split('\n');
+  let isFirst = true;
 
-  // 2. 두 번째 줄부터 본문 내용 매핑 시작
-  let isFirstBodyLine = true;
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
+  lines.forEach((line) => {
+    let currentLine = line.trim();
+    if (!currentLine) return;
     
-    // 뉴스의 구분선(---)을 만나면 노션 단락 구분 기호로 이쁘게 변경
-    if (line === '---') {
-      richText.push({ type: 'text', text: { content: '\n\n─────────────' } });
-      isFirstBodyLine = true;
-      continue;
-    }
-    if (line === '') {
-      isFirstBodyLine = true;
-      continue;
+    if (currentLine === '---') {
+      richText.push({ type: 'text', text: { content: '\n\n─────────────\n\n' } });
+      isFirst = true;
+      return;
     }
     
-    // 제목 바로 아랫줄이거나 새로운 단락 시작 시 강제 줄바꿈(\n\n) 추가
-    const sep = isFirstBodyLine ? '\n\n' : ' ';
-    richText.push({ type: 'text', text: { content: sep } });
-
-    const emojiMatch = line.match(/^(🏃|💭)(\s*)/);
+    if (!isFirst) {
+      richText.push({ type: 'text', text: { content: '\n\n' } });
+    }
+    
+    const emojiMatch = currentLine.match(/^(🏃|💭)(\s*)/);
     if (emojiMatch) {
       richText.push({ type: 'text', text: { content: emojiMatch[1] }, annotations: { bold: true } });
-      const rest = line.slice(emojiMatch[0].length);
-      richText.push(...splitBoldMarkdown((emojiMatch[2] || ' ') + rest, null));
-      isFirstBodyLine = true; // 🏃, 💭 파트가 끝나면 다음 줄은 강제로 아래로 밀어냄
-    } else {
-      richText.push(...splitBoldMarkdown(line, null));
-      isFirstBodyLine = false;
+      currentLine = currentLine.slice(emojiMatch[0].length);
+      richText.push({ type: 'text', text: { content: emojiMatch[2] || ' ' } });
     }
-  }
+    
+    richText.push(...splitBoldMarkdown(currentLine, null));
+    isFirst = false;
+  });
+  
   return richText;
 }
 
