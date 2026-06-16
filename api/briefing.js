@@ -47,44 +47,24 @@ async function runBriefing(overrideDate = null) {
     });
     const diaryData = await diaryRes.json();
     const page = diaryData.results?.[0];
-    if (page) diarySummary = getRichText(page.properties['일기 요약']);
+    if (page) diarySummary = getRichText(page.properties['일기 요약']).slice(0, 150);
   } catch (e) {
     console.error('diary fetch failed', e);
   }
 
-  const systemPrompt = `너는 민영의 아침 브리핑 작성 도우미야. 한국어, 존댓말, "~습니다/입니다" 위주, "~요" 남발 금지, 이모지 금지, 주체높임("~하시는") 금지, 물결/구어체 금지. 음성으로 읽힐 글이므로 기호 나열 금지.
+  const systemPrompt = `민영의 아침 브리핑. 한국어 존댓말, ~습니다 위주, 이모지/주체높임/구어체 금지.
 
-아래 헤더를 정확히 사용해 5개 섹션 작성:
+헤더 5개 순서대로 작성:
+오늘 날씨입니다 / 오늘 일정입니다 / 오늘 뉴스입니다 / 어제는 이런 하루를 보내셨네요 / 오늘은 이렇게 해보는 게 어떨까요
 
-오늘 날씨입니다
-(한 문단, 줄바꿈 없이. 서울 날씨·기온℃·외출팁)
-
-오늘 일정입니다
-(시간순. 종일일정 먼저, n일차 표기. 없으면 "등록된 일정이 없습니다.")
-
-오늘 뉴스입니다
-(뉴스1 본문 (URL)
-뉴스2 본문 (URL) — 뉴스1↔2 사이만 줄바꿈 1회)
-
-어제는 이런 하루를 보내셨네요
-(요약 1~2줄, 격려 1줄 이상 포함)
-
-오늘은 이렇게 해보는 게 어떨까요
-(행동제안 1문단
-인지전환 1문단 — 둘 사이만 줄바꿈 1회)
-
-규칙:
-- 날씨/일정/어제/오늘제안 섹션은 줄바꿈 절대 금지
-- 뉴스는 web_search로 최신 기사 찾기, 조중동 제외, 개별 기사 URL만 사용, (URL) 형식 인라인
-- "~에 따르면", "검색 결과" 등 출처 언급 금지`;
+날씨·일정·어제·제안: 줄바꿈 없이 한 문단. 뉴스: 뉴스1본문(URL) 줄바꿈 뉴스2본문(URL). 제안: 행동제안 줄바꿈 인지전환. web_search로 최신기사, 조중동 제외, 개별URL 인라인. 어제섹션은 격려 1줄 포함.`;
 
   const userPrompt = `오늘(${todayStr}) 일정: ${todaySchedule || '(없음)'}
 어제(${yesterdayStr}) 일기 요약: ${diarySummary || '(없음)'}
 오늘 브리핑 작성해줘.`;
 
   const briefingResult = await callClaude(ANTHROPIC_API_KEY, systemPrompt, userPrompt);
-  const rawBriefingText = briefingResult.text || '(브리핑 생성 실패)';
-  const briefingText = rawBriefingText.trim();
+  const briefingText = (briefingResult.text || '(브리핑 생성 실패)').trim();
 
   const days = ['일', '월', '화', '수', '목', '금', '토'];
   const dateObj = new Date(todayStr + 'T00:00:00+09:00');
@@ -99,8 +79,7 @@ async function runBriefing(overrideDate = null) {
       headers: notionHeaders(NOTION_TOKEN),
       body: JSON.stringify({ filter: { property: '날짜', date: { equals: todayStr } }, page_size: 1 }),
     });
-    const searchData = await searchRes.json();
-    existingPageId = searchData.results?.[0]?.id || null;
+    existingPageId = (await searchRes.json()).results?.[0]?.id || null;
   } catch (e) {
     console.error('existing page search failed', e);
   }
@@ -113,16 +92,11 @@ async function runBriefing(overrideDate = null) {
         headers: notionHeaders(NOTION_TOKEN),
         body: JSON.stringify({ properties: { '제목': { title: [{ text: { content: titleLabel } }] } } })
       });
-      const childrenRes = await fetch(`https://api.notion.com/v1/blocks/${existingPageId}/children?page_size=100`, {
-        headers: notionHeaders(NOTION_TOKEN),
-      });
-      const childrenData = await childrenRes.json();
+      const childrenData = await (await fetch(`https://api.notion.com/v1/blocks/${existingPageId}/children?page_size=100`, { headers: notionHeaders(NOTION_TOKEN) })).json();
       for (const block of (childrenData.results || [])) {
         await fetch(`https://api.notion.com/v1/blocks/${block.id}`, { method: 'DELETE', headers: notionHeaders(NOTION_TOKEN) });
       }
-    } catch (e) {
-      console.error('existing page update failed', e);
-    }
+    } catch (e) { console.error('update failed', e); }
     const appendRes = await fetch(`https://api.notion.com/v1/blocks/${existingPageId}/children`, {
       method: 'PATCH',
       headers: notionHeaders(NOTION_TOKEN),
@@ -142,29 +116,23 @@ async function runBriefing(overrideDate = null) {
         children: newBlocks,
       }),
     });
-    const createData = await createRes.json();
-    pageResult = { ok: createRes.ok, mode: 'created', pageId: createData.id };
+    pageResult = { ok: createRes.ok, mode: 'created', pageId: (await createRes.json()).id };
   }
 
-  return { ok: pageResult.ok, todayStr, yesterdayStr, todaySchedule, briefingText, debug: briefingResult.debug, notion: pageResult };
+  return { ok: pageResult.ok, todayStr, briefingText, debug: briefingResult.debug, notion: pageResult };
 }
 
 async function callClaude(apiKey, systemPrompt, userPrompt) {
   try {
     const messages = [{ role: 'user', content: userPrompt }];
     let finalText = '';
-
     for (let turn = 0; turn < 2; turn++) {
       const res = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01'
-        },
+        headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
         body: JSON.stringify({
           model: 'claude-haiku-4-5-20251001',
-          max_tokens: 1500,
+          max_tokens: 800,
           system: systemPrompt,
           messages,
           tools: [{ type: 'web_search_20250305', name: 'web_search' }]
@@ -172,20 +140,10 @@ async function callClaude(apiKey, systemPrompt, userPrompt) {
       });
       const data = await res.json();
       if (!res.ok || data.error) return { text: '', debug: { stage: 'claude_error', raw: data } };
-
       const textBlocks = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text);
-
-      if (data.stop_reason !== 'tool_use') {
-        finalText = textBlocks.join('\n').trim();
-        break;
-      }
-
-      const trimmedContent = (data.content || []).map((block) =>
-        block.type === 'tool_result' ? { ...block, content: '(검색 완료)' } : block
-      );
-      messages.push({ role: 'assistant', content: trimmedContent });
+      if (data.stop_reason !== 'tool_use') { finalText = textBlocks.join('\n').trim(); break; }
+      messages.push({ role: 'assistant', content: (data.content || []).map((b) => b.type === 'tool_result' ? { ...b, content: '(검색 완료)' } : b) });
     }
-
     return { text: finalText.trim(), debug: null };
   } catch (error) {
     return { text: '', debug: { stage: 'claude_exception', error: String(error) } };
@@ -202,11 +160,9 @@ function bodyParagraph(line) { return { object: 'block', type: 'paragraph', para
 function splitRichText(line) {
   const trailingUrlMatch = line.match(/^(.*)\((https?:\/\/[^\s)]+)\)\s*$/);
   if (trailingUrlMatch && !line.includes('](')) {
-    const mainText = trailingUrlMatch[1].trim();
-    const linkUrl = trailingUrlMatch[2];
-    const parts = splitBoldMarkdown(mainText);
+    const parts = splitBoldMarkdown(trailingUrlMatch[1].trim());
     parts.push({ type: 'text', text: { content: ' ' } });
-    parts.push({ type: 'text', text: { content: '🔗', link: { url: linkUrl } } });
+    parts.push({ type: 'text', text: { content: '🔗', link: { url: trailingUrlMatch[2] } } });
     return parts;
   }
   const parts = [];
@@ -242,9 +198,8 @@ function normalizeNewsBody(cleanedBody) {
   const items = [];
   let lastIndex = 0, m;
   while ((m = urlEndRegex.exec(flat)) !== null) {
-    const end = m.index + m[0].length;
-    items.push(flat.slice(lastIndex, end).trim());
-    lastIndex = end;
+    items.push(flat.slice(lastIndex, m.index + m[0].length).trim());
+    lastIndex = m.index + m[0].length;
   }
   const remainder = flat.slice(lastIndex).trim();
   if (remainder) { if (items.length > 0) items[items.length - 1] += ' ' + remainder; else items.push(remainder); }
@@ -266,8 +221,7 @@ function buildBriefingBlocks(rawText) {
     if (i > 0) blocks.push(dividerBlock());
     const current = positions[i];
     const next = positions[i + 1];
-    const startBody = current.pos + current.token.sub.length;
-    let cleanedBody = (next ? rawText.slice(startBody, next.pos) : rawText.slice(startBody)).trim();
+    let cleanedBody = (next ? rawText.slice(current.pos + current.token.sub.length, next.pos) : rawText.slice(current.pos + current.token.sub.length)).trim();
     if (current.token.sub === '어제는 이런 하루를' && cleanedBody.startsWith('보내셨네요')) cleanedBody = cleanedBody.slice('보내셨네요'.length).trim();
     if (current.token.sub === '오늘은 이렇게 해보는 게') {
       if (cleanedBody.startsWith('어떨까요?')) cleanedBody = cleanedBody.slice('어떨까요?'.length).trim();
@@ -294,45 +248,34 @@ function buildBriefingBlocks(rawText) {
 
 async function fetchTodayEvents(icsUrls, todayStr) {
   if (!icsUrls) return '';
-  const urls = icsUrls.split(',').map((u) => u.trim()).filter(Boolean);
   const events = [];
-  for (const url of urls) {
-    try {
-      const res = await fetch(url);
-      events.push(...parseIcsForDate(await res.text(), todayStr));
-    } catch (e) { console.error('calendar fetch failed:', url, e); }
+  for (const url of icsUrls.split(',').map((u) => u.trim()).filter(Boolean)) {
+    try { events.push(...parseIcsForDate(await (await fetch(url)).text(), todayStr)); }
+    catch (e) { console.error('calendar fetch failed:', url, e); }
   }
   events.sort((a, b) => { const [aK, aT] = a.split('|'); const [bK, bT] = b.split('|'); return aT !== bT ? aT.localeCompare(bT) : aK.localeCompare(bK); });
   return events.map((e) => e.split('|').slice(2).join('|')).join(', ');
 }
 function parseIcsForDate(icsText, todayStr) {
-  const results = [];
-  const targetDate = parseYMD(todayStr);
+  const results = [], targetDate = parseYMD(todayStr);
   for (const rawBlock of icsText.split('BEGIN:VEVENT').slice(1)) {
     const block = rawBlock.split('END:VEVENT')[0];
     const summaryMatch = block.match(/SUMMARY:(.+)/);
     const dtStartMatch = block.match(/DTSTART(?:;[^:\r\n]*)?:(\d{8})(T(\d{6}))?(Z)?/);
     if (!summaryMatch || !dtStartMatch) continue;
     const summary = summaryMatch[1].trim();
-    const dateStr = dtStartMatch[1];
-    const timeStr = dtStartMatch[3];
-    const isUTC = !!dtStartMatch[4];
+    const dateStr = dtStartMatch[1], timeStr = dtStartMatch[3], isUTC = !!dtStartMatch[4];
     const eventStart = parseYMD(dateStr);
     const rruleMatch = block.match(/RRULE:(.+)/);
     const exdates = [...block.matchAll(/EXDATE(?:;[^:\r\n]*)?:(\d{8})/g)].map((m) => m[1]);
-    let occurs = false;
-    if (!rruleMatch) occurs = dateStr === todayStr.replace(/-/g, '');
-    else {
-      if (compareYMD(targetDate, eventStart) < 0 || exdates.includes(todayStr.replace(/-/g, ''))) occurs = false;
-      else occurs = matchesRRule(rruleMatch[1], eventStart, targetDate);
-    }
+    let occurs = !rruleMatch ? dateStr === todayStr.replace(/-/g, '') :
+      compareYMD(targetDate, eventStart) >= 0 && !exdates.includes(todayStr.replace(/-/g, '')) && matchesRRule(rruleMatch[1], eventStart, targetDate);
     if (!occurs) continue;
     let timeLabel = '하루 종일', sortKey = '00:00', dayInfo = '';
     if (timeStr) {
       let hour = parseInt(timeStr.slice(0, 2), 10);
       if (isUTC) hour = (hour + 9) % 24;
-      timeLabel = `${String(hour).padStart(2, '0')}:${timeStr.slice(2, 4)}`;
-      sortKey = timeLabel;
+      timeLabel = sortKey = `${String(hour).padStart(2, '0')}:${timeStr.slice(2, 4)}`;
     } else {
       const dayNum = Math.round((toDate(targetDate) - toDate(eventStart)) / 86400000) + 1;
       if (dayNum >= 2) dayInfo = ` (${dayNum}일차)`;
@@ -352,9 +295,9 @@ function matchesRRule(rrule, start, target) {
   if (dayDiff < 0) return false;
   switch (parts.FREQ) {
     case 'DAILY': return dayDiff % interval === 0;
-    case 'WEEKLY': { const wd = Math.floor(dayDiff/7); if (wd % interval !== 0) return false; if (parts.BYDAY) return parts.BYDAY.split(',').includes(['SU','MO','TU','WE','TH','FR','SA'][toDate(target).getDay()]); return toDate(target).getDay() === toDate(start).getDay(); }
-    case 'MONTHLY': { if (target.d !== start.d) return false; const md = (target.y-start.y)*12+(target.m-start.m); return md >= 0 && md % interval === 0; }
-    case 'YEARLY': { if (target.m !== start.m || target.d !== start.d) return false; const yd = target.y-start.y; return yd >= 0 && yd % interval === 0; }
+    case 'WEEKLY': { const wd = Math.floor(dayDiff/7); if (wd%interval!==0) return false; return parts.BYDAY ? parts.BYDAY.split(',').includes(['SU','MO','TU','WE','TH','FR','SA'][toDate(target).getDay()]) : toDate(target).getDay()===toDate(start).getDay(); }
+    case 'MONTHLY': { if (target.d!==start.d) return false; const md=(target.y-start.y)*12+(target.m-start.m); return md>=0&&md%interval===0; }
+    case 'YEARLY': { if (target.m!==start.m||target.d!==start.d) return false; const yd=target.y-start.y; return yd>=0&&yd%interval===0; }
     default: return false;
   }
 }
