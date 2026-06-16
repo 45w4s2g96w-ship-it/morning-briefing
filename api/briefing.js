@@ -19,6 +19,30 @@ export default async function handler(req, res) {
   }
 }
 
+async function fetchGoogleNewsRSS() {
+  try {
+    const res = await fetch('https://news.google.com/rss?hl=ko&gl=KR&ceid=KR:ko', {
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+    const xml = await res.text();
+    const items = [];
+    const itemRegex = /<item>([\s\S]*?)<\/item>/g;
+    let m;
+    while ((m = itemRegex.exec(xml)) !== null && items.length < 20) {
+      const block = m[1];
+      const title = (block.match(/<title>([\s\S]*?)<\/title>/) || [])[1]?.replace(/<!\[CDATA\[|\]\]>/g, '').trim();
+      const link = (block.match(/<link>([\s\S]*?)<\/link>/) || (block.match(/href="([^"]+)"/) || []))[1]?.trim();
+      const desc = (block.match(/<description>([\s\S]*?)<\/description>/) || [])[1]?.replace(/<!\[CDATA\[|\]\]>/g, '').replace(/<[^>]+>/g, '').trim();
+      const source = (block.match(/<source[^>]*>([\s\S]*?)<\/source>/) || [])[1]?.replace(/<!\[CDATA\[|\]\]>/g, '').trim();
+      if (title && link) items.push({ title, link, desc: desc || '', source: source || '' });
+    }
+    return items;
+  } catch (e) {
+    console.error('RSS fetch failed', e);
+    return [];
+  }
+}
+
 async function runBriefing(overrideDate = null) {
   const NOTION_TOKEN = process.env.NOTION_TOKEN;
   const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -31,34 +55,25 @@ async function runBriefing(overrideDate = null) {
   yesterday.setDate(yesterday.getDate() - 1);
   const yesterdayStr = yesterday.toISOString().slice(0, 10);
 
-  let todaySchedule = '';
-  try {
-    todaySchedule = await fetchTodayEvents(ICLOUD_CALENDAR_URLS, todayStr);
-  } catch (e) {
-    console.error('calendar fetch failed', e);
-  }
+  const [todayScheduleResult, diaryResult, newsItems] = await Promise.all([
+    fetchTodayEvents(ICLOUD_CALENDAR_URLS, todayStr).catch(() => ''),
+    fetchDiary(NOTION_TOKEN, yesterdayStr),
+    fetchGoogleNewsRSS(),
+  ]);
 
-  let diarySummary = '';
-  let diarySuggest = '';
-  try {
-    const diaryRes = await fetch(`https://api.notion.com/v1/databases/${DIARY_DB}/query`, {
-      method: 'POST',
-      headers: notionHeaders(NOTION_TOKEN),
-      body: JSON.stringify({ filter: { property: '날짜', date: { equals: yesterdayStr } }, page_size: 1 }),
-    });
-    const diaryData = await diaryRes.json();
-    const page = diaryData.results?.[0];
-    if (page) {
-      diarySummary = getRichText(page.properties['일기 요약']);
-      diarySuggest = getRichText(page.properties['제언']);
-    }
-  } catch (e) {
-    console.error('diary fetch failed', e);
-  }
+  const todaySchedule = todayScheduleResult || '';
+  const { diarySummary, diarySuggest } = diaryResult;
 
-  const systemPrompt = `너는 민영의 아침 브리핑을 작성하는 도우미야. 확인 없이 바로 작성. 날씨와 뉴스는 web_search로 직접 검색.
+  // 뉴스 텍스트 구성 (조중동 표시)
+  const excludeSources = ['조선일보', '중앙일보', '동아일보', 'Chosun', 'JoongAng', 'Donga'];
+  const newsText = newsItems
+    .map((item, i) => `${i + 1}. [${item.source}] ${item.title} / ${item.desc} / URL: ${item.link}`)
+    .join('
+');
 
-말투: 한국어, ~입니다/~습니다 위주, ~요는 가끔. ~하셨어요/~하실/~드립니다 같은 주체높임/극존칭 전부 금지. 이모지/구어체/마크다운 볼드 금지. 음성으로 읽힐 글이므로 괄호/기호 금지.
+  const systemPrompt = `너는 민영의 아침 브리핑을 작성하는 도우미야.
+
+말투: 한국어, ~입니다/~습니다 위주, ~요는 가끔. ~하셨어요/~하실 같은 주체높임 전부 금지. 이모지/구어체/마크다운 볼드 금지. 음성으로 읽힐 글이므로 괄호/기호 금지.
 
 헤더 5개를 정확히 이 텍스트로 순서대로 작성:
 오늘 날씨입니다
@@ -67,16 +82,20 @@ async function runBriefing(overrideDate = null) {
 어제는 이런 하루를 보내셨네요
 오늘은 이렇게 해보는 게 어떨까요
 
-각 섹션 작성 방법:
-- 날씨: 줄바꿈 없이 한 문단. 서울 기온/날씨/외출 참고사항.
-- 일정: 시간순으로 자연스럽게. 종일 일정 1개뿐이거나 없으면 일기 요약 참고해서 오늘 어울리는 활동 추천 한 마디 덧붙일 것.
-- 뉴스: 각 뉴스마다 한두 줄 요약 + 배경 설명 한두 줄. 문장은 ~입니다로 종결. URL은 마지막 문장 바로 뒤 같은 줄에. 두 뉴스 사이 빈 줄 하나. web_search로 최신 기사, 조중동 제외, 개별 기사 URL만.
-- 어제: 줄바꿈 없이 한 문단. 일기 요약 1~2줄 + 구체적 행동/태도 짚어 격려 1줄.
-- 오늘 제안: 행동제안 한 문단, 빈 줄, 인지전환 한 문단. 일기 요약과 제언 참고해서 구체적으로.`;
+각 섹션:
+- 날씨: 줄바꿈 없이 한 문단. 서울 기온은 섭씨만. web_search로 오늘 서울 날씨 검색해서 작성.
+- 일정: 시간순. 종일 1개뿐이거나 없으면 일기 요약 참고해서 활동 추천 한 마디 덧붙일 것.
+- 뉴스: 아래 기사 목록에서 조중동(${excludeSources.join('/')}) 제외하고 주요 시사 2개 선택. 각 뉴스마다 한두 줄 요약 + 배경 설명 한두 줄, ~입니다로 종결. URL은 마지막 문장 바로 뒤 괄호로: 본문입니다. (https://...) 두 뉴스 사이 빈 줄 하나. 뉴스 라벨 금지.
+- 어제: 줄바꿈 없이 한 문단. 요약 1~2줄 + 구체적 행동 짚어 격려 1줄.
+- 오늘 제안: 행동제안 한 문단, 빈 줄, 인지전환 한 문단. 일기와 제언 참고해서 구체적으로.`;
 
   const userPrompt = `오늘(${todayStr}) 일정: ${todaySchedule || '(없음)'}
 어제(${yesterdayStr}) 일기 요약: ${diarySummary || '(없음)'}
 어제 제언: ${diarySuggest || '(없음)'}
+
+기사 목록:
+${newsText || '(없음)'}
+
 오늘 브리핑 작성해줘.`;
 
   const briefingResult = await callClaude(ANTHROPIC_API_KEY, systemPrompt, userPrompt);
@@ -138,6 +157,26 @@ async function runBriefing(overrideDate = null) {
   return { ok: pageResult.ok, todayStr, briefingText, debug: briefingResult.debug, notion: pageResult };
 }
 
+async function fetchDiary(token, yesterdayStr) {
+  try {
+    const res = await fetch(`https://api.notion.com/v1/databases/${DIARY_DB}/query`, {
+      method: 'POST',
+      headers: notionHeaders(token),
+      body: JSON.stringify({ filter: { property: '날짜', date: { equals: yesterdayStr } }, page_size: 1 }),
+    });
+    const data = await res.json();
+    const page = data.results?.[0];
+    if (!page) return { diarySummary: '', diarySuggest: '' };
+    return {
+      diarySummary: getRichText(page.properties['일기 요약']),
+      diarySuggest: getRichText(page.properties['제언']),
+    };
+  } catch (e) {
+    console.error('diary fetch failed', e);
+    return { diarySummary: '', diarySuggest: '' };
+  }
+}
+
 async function callClaude(apiKey, systemPrompt, userPrompt) {
   try {
     const messages = [{ role: 'user', content: userPrompt }];
@@ -147,11 +186,11 @@ async function callClaude(apiKey, systemPrompt, userPrompt) {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 800,
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 1500,
           system: systemPrompt,
           messages,
-          tools: [{ type: 'web_search_20250305', name: 'web_search' }]
+          tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 1 }]
         })
       });
       const data = await res.json();
@@ -172,7 +211,6 @@ function dividerBlock() { return { object: 'block', type: 'divider', divider: {}
 function emptyParagraph() { return { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: '\u200b' } }] } }; }
 function titleParagraph(text) { return { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: text }, annotations: { bold: true, underline: true } }] } }; }
 function bodyParagraph(line) { return { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: line } }] } }; }
-
 function linkParagraph(text, url) {
   return {
     object: 'block', type: 'paragraph',
@@ -185,8 +223,17 @@ function linkParagraph(text, url) {
   };
 }
 
+function parseNewsLine(line) {
+  // (URL) 형식
+  const m1 = line.match(/^(.*?)\s*\((https?:\/\/[^\s)]+)\)\s*$/);
+  if (m1) return { text: m1[1].trim(), url: m1[2] };
+  // bare URL
+  const m2 = line.match(/^(.*?)\s*(https?:\/\/\S+)\s*$/);
+  if (m2) return { text: m2[1].trim(), url: m2[2] };
+  return { text: line, url: null };
+}
+
 function normalizeNewsBody(cleanedBody) {
-  // 각 뉴스 항목을 URL 기준으로 분리 (줄바꿈/빈줄 보존)
   const lines = cleanedBody.split('\n').map((l) => l.trim()).filter(Boolean);
   const items = [];
   let current = [];
@@ -196,7 +243,7 @@ function normalizeNewsBody(cleanedBody) {
       continue;
     }
     current.push(line);
-    if (/\(https?:\/\/[^\s)]+\)$/.test(line)) {
+    if (/https?:\/\/\S+/.test(line)) {
       items.push(current.join(' '));
       current = [];
     }
@@ -206,12 +253,6 @@ function normalizeNewsBody(cleanedBody) {
     else items.push(current.join(' '));
   }
   return items.filter(Boolean).join('\n---\n');
-}
-
-function parseNewsLine(line) {
-  const m = line.match(/^(.*)\((https?:\/\/[^\s)]+)\)\s*$/);
-  if (m) return { text: m[1].trim(), url: m[2] };
-  return { text: line, url: null };
 }
 
 function buildBriefingBlocks(rawText) {
@@ -238,9 +279,7 @@ function buildBriefingBlocks(rawText) {
     }
     if (current.token.sub === '오늘 날씨입니다') cleanedBody = cleanedBody.split('\n').map((l) => l.trim()).filter(Boolean).join(' ');
     if (current.token.sub === '오늘 뉴스입니다') cleanedBody = normalizeNewsBody(cleanedBody);
-
     blocks.push(titleParagraph(current.token.official));
-
     for (const line of cleanedBody.split('\n')) {
       const trimmed = line.trim();
       if (!trimmed) continue;
@@ -249,7 +288,6 @@ function buildBriefingBlocks(rawText) {
       if (url) blocks.push(linkParagraph(text, url));
       else blocks.push(bodyParagraph(trimmed));
     }
-
     while (blocks.length > 0) {
       const last = blocks[blocks.length - 1];
       const rt = last.type === 'paragraph' ? last.paragraph.rich_text : null;
