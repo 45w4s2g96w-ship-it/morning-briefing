@@ -11,7 +11,8 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: 'unauthorized' });
   }
   try {
-    const result = await runBriefing();
+    const overrideDate = req.query?.date || null;
+    const result = await runBriefing(overrideDate);
     return res.status(200).json(result);
   } catch (error) {
     console.error('에러 발생:', error);
@@ -19,16 +20,16 @@ export default async function handler(req, res) {
   }
 }
 
-async function runBriefing() {
+async function runBriefing(overrideDate = null) {
   const NOTION_TOKEN = process.env.NOTION_TOKEN;
   const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
   const ICLOUD_CALENDAR_URLS = process.env.ICLOUD_CALENDAR_URLS;
 
   const now = new Date();
   const kstNow = new Date(now.getTime() + 9 * 60 * 60 * 1000);
-  const todayStr = kstNow.toISOString().slice(0, 10);
-  const yesterday = new Date(kstNow);
-  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+  const todayStr = overrideDate || kstNow.toISOString().slice(0, 10);
+  const yesterday = new Date(todayStr);
+  yesterday.setDate(yesterday.getDate() - 1);
   const yesterdayStr = yesterday.toISOString().slice(0, 10);
 
   let todaySchedule = '';
@@ -146,7 +147,8 @@ ${newsExcludeText}
   const { briefingText, newsMeta } = extractNewsMeta(rawBriefingText);
 
   const days = ['일', '월', '화', '수', '목', '금', '토'];
-  const titleLabel = `${kstNow.getUTCMonth() + 1}월 ${kstNow.getUTCDate()}일 ${days[kstNow.getUTCDay()]}요일 모닝 브리핑입니다.`;
+  const dateObj = new Date(todayStr + 'T00:00:00+09:00');
+  const titleLabel = `${dateObj.getMonth() + 1}월 ${dateObj.getDate()}일 ${days[dateObj.getDay()]}요일 모닝 브리핑입니다.`;
 
   const newBlocks = buildBriefingBlocks(briefingText);
 
@@ -236,19 +238,12 @@ ${newsExcludeText}
   return { ok: pageResult.ok, todayStr, yesterdayStr, todaySchedule, briefingText, newsMeta, newsSave: newsSaveResult, debug: briefingResult.debug, notion: pageResult };
 }
 
-// ============================================
-// Claude API 호출 — 개선된 버전
-// 변경 1: 최대 5턴 → 3턴
-// 변경 2: max_tokens 4000 → 2000
-// 변경 3: 다음 턴으로 넘길 때 tool_result 블록(검색 결과 전문) 제거
-//          → 입력 토큰 누적 폭주 방지
-// ============================================
 async function callClaude(apiKey, systemPrompt, userPrompt) {
   try {
     const messages = [{ role: 'user', content: userPrompt }];
     let finalText = '';
 
-    for (let turn = 0; turn < 3; turn++) {  // 5 → 3턴
+    for (let turn = 0; turn < 3; turn++) {
       const res = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -258,7 +253,7 @@ async function callClaude(apiKey, systemPrompt, userPrompt) {
         },
         body: JSON.stringify({
           model: 'claude-sonnet-4-6',
-          max_tokens: 2000,  // 4000 → 2000
+          max_tokens: 2000,
           system: systemPrompt,
           messages,
           tools: [{ type: 'web_search_20250305', name: 'web_search' }]
@@ -268,15 +263,15 @@ async function callClaude(apiKey, systemPrompt, userPrompt) {
       if (!res.ok || data.error) return { text: '', debug: { stage: 'claude_error', raw: data } };
 
       const textBlocks = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text);
-      finalText = textBlocks.join('\n').trim();
 
-      if (data.stop_reason !== 'tool_use') break;
+      // 수정: end_turn일 때만 finalText 저장
+      if (data.stop_reason !== 'tool_use') {
+        finalText = textBlocks.join('\n').trim();
+        break;
+      }
 
-      // tool_result(검색 결과 전문) 블록을 제거하고 검색 쿼리 정보만 남겨서
-      // 다음 턴 입력 토큰 누적을 최소화
       const trimmedContent = (data.content || []).map((block) => {
         if (block.type === 'tool_result') {
-          // 검색 결과 전문 대신 "(검색 완료)"로 대체
           return { ...block, content: '(검색 완료)' };
         }
         return block;
