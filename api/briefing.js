@@ -56,7 +56,9 @@ async function runBriefing(overrideDate = null) {
     console.error('diary fetch failed', e);
   }
 
-  const systemPrompt = `민영의 아침 브리핑. 확인 없이 바로 작성. 날씨와 뉴스는 web_search로 직접 검색. 한국어 존댓말, ~습니다 위주, 이모지/주체높임/구어체/마크다운 볼드 전부 금지. 음성으로 읽힐 글이므로 괄호/기호 금지.
+  const systemPrompt = `너는 민영의 아침 브리핑을 작성하는 도우미야. 확인 없이 바로 작성. 날씨와 뉴스는 web_search로 직접 검색.
+
+말투: 한국어, ~입니다/~습니다 위주, ~요는 가끔. ~하셨어요/~하실/~드립니다 같은 주체높임/극존칭 전부 금지. 이모지/구어체/마크다운 볼드 금지. 음성으로 읽힐 글이므로 괄호/기호 금지.
 
 헤더 5개를 정확히 이 텍스트로 순서대로 작성:
 오늘 날씨입니다
@@ -65,10 +67,12 @@ async function runBriefing(overrideDate = null) {
 어제는 이런 하루를 보내셨네요
 오늘은 이렇게 해보는 게 어떨까요
 
-날씨·어제·제안: 줄바꿈 없이 한 문단.
-일정: 일정이 종일 1개뿐이거나 없으면 일기 요약 참고해서 오늘 하루에 어울리는 짧은 활동 추천 한 마디를 자연스럽게 덧붙일 것.
-뉴스: 각 뉴스마다 한 줄 요약 후 배경 설명 한두 줄. 문장은 반드시 ~입니다로 종결. URL은 설명 바로 뒤 같은 줄에. 두 뉴스 사이 빈 줄 하나.
-제안: 행동제안 빈줄 인지전환. web_search로 최신기사, 조중동 제외, 개별 기사 URL 인라인. 어제섹션은 격려 1줄 포함.`;
+각 섹션 작성 방법:
+- 날씨: 줄바꿈 없이 한 문단. 서울 기온/날씨/외출 참고사항.
+- 일정: 시간순으로 자연스럽게. 종일 일정 1개뿐이거나 없으면 일기 요약 참고해서 오늘 어울리는 활동 추천 한 마디 덧붙일 것.
+- 뉴스: 각 뉴스마다 한두 줄 요약 + 배경 설명 한두 줄. 문장은 ~입니다로 종결. URL은 마지막 문장 바로 뒤 같은 줄에. 두 뉴스 사이 빈 줄 하나. web_search로 최신 기사, 조중동 제외, 개별 기사 URL만.
+- 어제: 줄바꿈 없이 한 문단. 일기 요약 1~2줄 + 구체적 행동/태도 짚어 격려 1줄.
+- 오늘 제안: 행동제안 한 문단, 빈 줄, 인지전환 한 문단. 일기 요약과 제언 참고해서 구체적으로.`;
 
   const userPrompt = `오늘(${todayStr}) 일정: ${todaySchedule || '(없음)'}
 어제(${yesterdayStr}) 일기 요약: ${diarySummary || '(없음)'}
@@ -182,16 +186,25 @@ function linkParagraph(text, url) {
 }
 
 function normalizeNewsBody(cleanedBody) {
-  const flat = cleanedBody.split('\n').map((l) => l.trim()).filter((l) => l && l !== '---').join(' ');
-  const urlEndRegex = /\(https?:\/\/[^\s)]+\)/g;
+  // 각 뉴스 항목을 URL 기준으로 분리 (줄바꿈/빈줄 보존)
+  const lines = cleanedBody.split('\n').map((l) => l.trim()).filter(Boolean);
   const items = [];
-  let lastIndex = 0, m;
-  while ((m = urlEndRegex.exec(flat)) !== null) {
-    items.push(flat.slice(lastIndex, m.index + m[0].length).trim());
-    lastIndex = m.index + m[0].length;
+  let current = [];
+  for (const line of lines) {
+    if (line === '---') {
+      if (current.length) { items.push(current.join(' ')); current = []; }
+      continue;
+    }
+    current.push(line);
+    if (/\(https?:\/\/[^\s)]+\)$/.test(line)) {
+      items.push(current.join(' '));
+      current = [];
+    }
   }
-  const remainder = flat.slice(lastIndex).trim();
-  if (remainder) { if (items.length > 0) items[items.length - 1] += ' ' + remainder; else items.push(remainder); }
+  if (current.length) {
+    if (items.length) items[items.length - 1] += ' ' + current.join(' ');
+    else items.push(current.join(' '));
+  }
   return items.filter(Boolean).join('\n---\n');
 }
 
