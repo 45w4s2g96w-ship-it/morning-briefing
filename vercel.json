@@ -1,10 +1,4 @@
 {
-  "crons": [
-    {
-      "path": "/api/briefing",
-      "schedule": "30 21 * * *"
-    }
-  ],
   "functions": {
     "api/briefing.js": {
       "maxDuration": 60
