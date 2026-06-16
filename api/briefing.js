@@ -39,6 +39,7 @@ async function runBriefing(overrideDate = null) {
   }
 
   let diarySummary = '';
+  let diarySuggest = '';
   try {
     const diaryRes = await fetch(`https://api.notion.com/v1/databases/${DIARY_DB}/query`, {
       method: 'POST',
@@ -47,24 +48,32 @@ async function runBriefing(overrideDate = null) {
     });
     const diaryData = await diaryRes.json();
     const page = diaryData.results?.[0];
-    if (page) diarySummary = getRichText(page.properties['일기 요약']).slice(0, 150);
+    if (page) {
+      diarySummary = getRichText(page.properties['일기 요약']);
+      diarySuggest = getRichText(page.properties['제언']);
+    }
   } catch (e) {
     console.error('diary fetch failed', e);
   }
 
-  const systemPrompt = `민영의 아침 브리핑. 한국어 존댓말, ~습니다 위주, 이모지/주체높임/구어체 금지.
+  const systemPrompt = `민영의 아침 브리핑. 한국어 존댓말, ~습니다 위주, 이모지/주체높임/구어체 금지. 마크다운 볼드(**텍스트**) 절대 사용 금지. 평문으로만 작성.
 
-헤더 5개 순서대로 작성:
-오늘 날씨입니다 / 오늘 일정입니다 / 오늘 뉴스입니다 / 어제는 이런 하루를 보내셨네요 / 오늘은 이렇게 해보는 게 어떨까요
+헤더 5개를 정확히 이 텍스트로 순서대로 작성:
+오늘 날씨입니다
+오늘 일정입니다
+오늘 뉴스입니다
+어제는 이런 하루를 보내셨네요
+오늘은 이렇게 해보는 게 어떨까요
 
-날씨·일정·어제·제안: 줄바꿈 없이 한 문단. 뉴스: 뉴스1본문(URL) 줄바꿈 뉴스2본문(URL). 제안: 행동제안 줄바꿈 인지전환. web_search로 최신기사, 조중동 제외, 개별URL 인라인. 어제섹션은 격려 1줄 포함.`;
+날씨·일정·어제·제안: 줄바꿈 없이 한 문단. 뉴스: 뉴스1본문 (URL) 줄바꿈 뉴스2본문 (URL). 제안: 행동제안 줄바꿈 인지전환. web_search로 최신기사, 조중동 제외, 개별 기사 URL 인라인. 어제섹션은 격려 1줄 포함.`;
 
   const userPrompt = `오늘(${todayStr}) 일정: ${todaySchedule || '(없음)'}
 어제(${yesterdayStr}) 일기 요약: ${diarySummary || '(없음)'}
+어제 제언: ${diarySuggest || '(없음)'}
 오늘 브리핑 작성해줘.`;
 
   const briefingResult = await callClaude(ANTHROPIC_API_KEY, systemPrompt, userPrompt);
-  const briefingText = (briefingResult.text || '(브리핑 생성 실패)').trim();
+  const briefingText = (briefingResult.text || '(브리핑 생성 실패)').replace(/\*\*/g, '').trim();
 
   const days = ['일', '월', '화', '수', '목', '금', '토'];
   const dateObj = new Date(todayStr + 'T00:00:00+09:00');
@@ -155,43 +164,20 @@ function getRichText(prop) { if (!prop) return ''; if (prop.rich_text) return pr
 function dividerBlock() { return { object: 'block', type: 'divider', divider: {} }; }
 function emptyParagraph() { return { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: '\u200b' } }] } }; }
 function titleParagraph(text) { return { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: text }, annotations: { bold: true, underline: true } }] } }; }
-function bodyParagraph(line) { return { object: 'block', type: 'paragraph', paragraph: { rich_text: splitRichText(line) } }; }
+function bodyParagraph(line) { return { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: line } }] } }; }
 
-function splitRichText(line) {
-  const trailingUrlMatch = line.match(/^(.*)\((https?:\/\/[^\s)]+)\)\s*$/);
-  if (trailingUrlMatch && !line.includes('](')) {
-    const parts = splitBoldMarkdown(trailingUrlMatch[1].trim());
-    parts.push({ type: 'text', text: { content: ' ' } });
-    parts.push({ type: 'text', text: { content: '🔗', link: { url: trailingUrlMatch[2] } } });
-    return parts;
-  }
-  const parts = [];
-  const regex = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|\*\*(.+?)\*\*/g;
-  let lastIndex = 0, m;
-  while ((m = regex.exec(line)) !== null) {
-    if (m.index > lastIndex) parts.push({ content: line.slice(lastIndex, m.index), bold: false, link: null });
-    if (m[1] !== undefined) parts.push({ content: m[1], bold: false, link: m[2] });
-    else parts.push({ content: m[3], bold: true, link: null });
-    lastIndex = m.index + m[0].length;
-  }
-  if (lastIndex < line.length) parts.push({ content: line.slice(lastIndex), bold: false, link: null });
-  if (parts.length === 0) parts.push({ content: line, bold: false, link: null });
-  return parts.map(toRichTextObj);
+function linkParagraph(text, url) {
+  return {
+    object: 'block', type: 'paragraph',
+    paragraph: {
+      rich_text: [
+        { type: 'text', text: { content: text + ' ' } },
+        { type: 'text', text: { content: '🔗', link: { url } } }
+      ]
+    }
+  };
 }
-function toRichTextObj(p) { const obj = { type: 'text', text: { content: p.content } }; if (p.bold) obj.annotations = { bold: true }; if (p.link) obj.text.link = { url: p.link }; return obj; }
-function splitBoldMarkdown(line) {
-  const parts = [];
-  const regex = /\*\*(.+?)\*\*/g;
-  let lastIndex = 0, m;
-  while ((m = regex.exec(line)) !== null) {
-    if (m.index > lastIndex) parts.push({ content: line.slice(lastIndex, m.index), bold: false });
-    parts.push({ content: m[1], bold: true });
-    lastIndex = m.index + m[0].length;
-  }
-  if (lastIndex < line.length) parts.push({ content: line.slice(lastIndex), bold: false });
-  if (parts.length === 0) parts.push({ content: line, bold: false });
-  return parts.map((p) => { const obj = { type: 'text', text: { content: p.content } }; if (p.bold) obj.annotations = { bold: true }; return obj; });
-}
+
 function normalizeNewsBody(cleanedBody) {
   const flat = cleanedBody.split('\n').map((l) => l.trim()).filter((l) => l && l !== '---').join(' ');
   const urlEndRegex = /\(https?:\/\/[^\s)]+\)/g;
@@ -205,6 +191,13 @@ function normalizeNewsBody(cleanedBody) {
   if (remainder) { if (items.length > 0) items[items.length - 1] += ' ' + remainder; else items.push(remainder); }
   return items.filter(Boolean).join('\n---\n');
 }
+
+function parseNewsLine(line) {
+  const m = line.match(/^(.*)\((https?:\/\/[^\s)]+)\)\s*$/);
+  if (m) return { text: m[1].trim(), url: m[2] };
+  return { text: line, url: null };
+}
+
 function buildBriefingBlocks(rawText) {
   const tokens = [
     { sub: '오늘 날씨입니다', official: '오늘 날씨입니다.' },
@@ -229,13 +222,18 @@ function buildBriefingBlocks(rawText) {
     }
     if (current.token.sub === '오늘 날씨입니다') cleanedBody = cleanedBody.split('\n').map((l) => l.trim()).filter(Boolean).join(' ');
     if (current.token.sub === '오늘 뉴스입니다') cleanedBody = normalizeNewsBody(cleanedBody);
+
     blocks.push(titleParagraph(current.token.official));
+
     for (const line of cleanedBody.split('\n')) {
       const trimmed = line.trim();
       if (!trimmed) continue;
       if (trimmed === '---') { blocks.push(emptyParagraph()); continue; }
-      blocks.push(bodyParagraph(trimmed));
+      const { text, url } = parseNewsLine(trimmed);
+      if (url) blocks.push(linkParagraph(text, url));
+      else blocks.push(bodyParagraph(trimmed));
     }
+
     while (blocks.length > 0) {
       const last = blocks[blocks.length - 1];
       const rt = last.type === 'paragraph' ? last.paragraph.rich_text : null;
@@ -268,7 +266,7 @@ function parseIcsForDate(icsText, todayStr) {
     const eventStart = parseYMD(dateStr);
     const rruleMatch = block.match(/RRULE:(.+)/);
     const exdates = [...block.matchAll(/EXDATE(?:;[^:\r\n]*)?:(\d{8})/g)].map((m) => m[1]);
-    let occurs = !rruleMatch ? dateStr === todayStr.replace(/-/g, '') :
+    const occurs = !rruleMatch ? dateStr === todayStr.replace(/-/g, '') :
       compareYMD(targetDate, eventStart) >= 0 && !exdates.includes(todayStr.replace(/-/g, '')) && matchesRRule(rruleMatch[1], eventStart, targetDate);
     if (!occurs) continue;
     let timeLabel = '하루 종일', sortKey = '00:00', dayInfo = '';
