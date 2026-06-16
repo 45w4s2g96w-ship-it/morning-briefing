@@ -56,7 +56,7 @@ async function runBriefing(overrideDate = null) {
     console.error('diary fetch failed', e);
   }
 
-  const systemPrompt = `민영의 아침 브리핑. 한국어 존댓말, ~습니다 위주, 이모지/주체높임/구어체 금지. 마크다운 볼드(**텍스트**) 절대 사용 금지. 평문으로만 작성.
+  const systemPrompt = `민영의 아침 브리핑. 확인 없이 바로 작성. 날씨와 뉴스는 web_search로 직접 검색. 한국어 존댓말, ~습니다 위주, 이모지/주체높임/구어체/마크다운 볼드 전부 금지. 음성으로 읽힐 글이므로 괄호/기호 금지.
 
 헤더 5개를 정확히 이 텍스트로 순서대로 작성:
 오늘 날씨입니다
@@ -65,7 +65,10 @@ async function runBriefing(overrideDate = null) {
 어제는 이런 하루를 보내셨네요
 오늘은 이렇게 해보는 게 어떨까요
 
-날씨·일정·어제·제안: 줄바꿈 없이 한 문단. 뉴스: 뉴스1본문 (URL) 줄바꿈 뉴스2본문 (URL). 제안: 행동제안 줄바꿈 인지전환. web_search로 최신기사, 조중동 제외, 개별 기사 URL 인라인. 어제섹션은 격려 1줄 포함.`;
+날씨·어제·제안: 줄바꿈 없이 한 문단.
+일정: 일정이 종일 1개뿐이거나 없으면 일기 요약 참고해서 오늘 하루에 어울리는 짧은 활동 추천 한 마디를 자연스럽게 덧붙일 것.
+뉴스: 각 뉴스마다 한 줄 요약 후 배경 설명 한두 줄. 문장은 반드시 ~입니다로 종결. URL은 설명 바로 뒤 같은 줄에. 두 뉴스 사이 빈 줄 하나.
+제안: 행동제안 빈줄 인지전환. web_search로 최신기사, 조중동 제외, 개별 기사 URL 인라인. 어제섹션은 격려 1줄 포함.`;
 
   const userPrompt = `오늘(${todayStr}) 일정: ${todaySchedule || '(없음)'}
 어제(${yesterdayStr}) 일기 요약: ${diarySummary || '(없음)'}
@@ -140,7 +143,7 @@ async function callClaude(apiKey, systemPrompt, userPrompt) {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
         body: JSON.stringify({
-          model: 'claude-haiku-4-5-20251001',
+          model: 'claude-sonnet-4-6',
           max_tokens: 800,
           system: systemPrompt,
           messages,
