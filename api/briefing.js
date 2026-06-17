@@ -91,9 +91,9 @@ async function runBriefing(overrideDate = null) {
     .map((item, i) => `${i + 1}. [${item.source}] ${item.title}${item.desc ? ' / ' + item.desc : ''} / URL: ${item.link}`)
     .join('\n');
 
-  const systemPrompt = `너는 민영의 아침 브리핑을 작성하는 도우미야.
+  const systemPrompt = `너는 민영의 아침 브리핑을 작성하는 비서야.
 
-말투: 한국어, ~입니다/~습니다 위주, ~요는 가끔. ~하셨어요/~하실 같은 주체높임 전부 금지. 이모지/구어체/마크다운 볼드 금지. 음성으로 읽힐 글이므로 괄호/기호 금지.
+말투: 한국어, ~요/~입니다 자연스럽게 섞어서. 날씨 섹션은 기상캐스터처럼 ~입니다 위주. 나머지는 ~요와 ~입니다 번갈아 사용. ~하셨어요/~하실 같은 주체높임 전부 금지. ~십시오/~것입니다 금지. 이모지/구어체/마크다운 볼드 금지. 음성으로 읽힐 글이므로 괄호/기호 금지.
 
 헤더 5개를 정확히 이 텍스트로 순서대로 작성:
 오늘 날씨입니다
@@ -103,11 +103,12 @@ async function runBriefing(overrideDate = null) {
 오늘은 이렇게 해보는 게 어떨까요
 
 각 섹션 분량과 형식:
-- 날씨: 한 문단 3~4문장. 줄바꿈 없이. 서울 오늘(${todayStr}) 기온 섭씨만. web_search로 오늘 서울 날씨 검색.
-- 일정: 시간순 자연스럽게. 종일 1개뿐이거나 없으면 일기 요약 참고해서 활동 추천 한 마디 덧붙일 것.
-- 뉴스: 아래 기사 목록에서 ${excludeSources.join('/')} 제외하고 주요 시사 2개 선택. 각 뉴스마다 2~4문장 요약+배경설명, ~입니다로 종결. URL은 마지막 문장 바로 뒤 같은 줄에 괄호 없이 그냥 붙일 것: 본문입니다 URL주소 뉴스 번호/라벨 금지. 두 뉴스 사이 줄바꿈만, 빈 줄 없음.
-- 어제: 한 문단 3~4문장. 줄바꿈 없이. 요약+격려 포함.
-- 오늘 제안: 행동제안 3~4문장, 줄바꿈, 인지전환 3~4문장. 일기와 제언 참고해서 구체적으로.`;
+- 날씨: 250자 이내. 한 문단 3~4문장. 줄바꿈 없이. web_search로 오늘 서울 날씨를 섭씨 기준으로 검색. 검색 출처/단위 변환 과정 언급 절대 금지. 기상캐스터처럼 "서울은 오늘 최고기온 N도, 최저 N도로..." 형식으로 시작. 날씨 사실 먼저, 체감·생활 조언으로 마무리.
+- 일정: 250자 이내. 시간순 자연스럽게. 종일 1개뿐이거나 없으면 일기 요약 참고해서 활동 추천 한 마디 덧붙일 것.
+- 뉴스: 뉴스당 300자 이내, 총 600자 이내. 아래 기사 목록에서 ${excludeSources.join('/')} 제외하고 주요 시사 2개 선택. 각 뉴스마다 2~4문장 요약+배경설명, ~입니다로 종결. URL은 마지막 문장 바로 뒤 같은 줄에 괄호 없이 그냥 붙일 것: 본문입니다 URL주소 뉴스 번호/라벨 금지. 두 뉴스 사이 줄바꿈만, 빈 줄 없음.
+- 어제: 300자 이내. 한 문단 3~4문장. 줄바꿈 없이. 요약+격려 포함.
+- 오늘 제안: 400자 이내. 행동제안 3~4문장, 줄바꿈, 인지전환 3~4문장. 일기와 제언 참고해서 구체적으로.
+전체 합계 1800자 이내.`;
 
   const userPrompt = `오늘(${todayStr}) 일정: ${todaySchedule || '(없음)'}
 어제(${yesterdayStr}) 일기 요약: ${diarySummary || '(없음)'}
@@ -195,7 +196,7 @@ async function callClaude(apiKey, systemPrompt, userPrompt) {
         },
         body: JSON.stringify({
           model: 'claude-haiku-4-5-20251001',
-          max_tokens: 1700,
+          max_tokens: 2200,
           system: systemPrompt,
           messages,
           tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 1 }]
@@ -226,9 +227,6 @@ function getRichText(prop) {
   return '';
 }
 function dividerBlock() { return { object: 'block', type: 'divider', divider: {} }; }
-function emptyParagraph() {
-  return { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: '\u200b' } }] } };
-}
 function titleParagraph(text) {
   return { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: text }, annotations: { bold: true, underline: true } }] } };
 }
@@ -254,7 +252,6 @@ function parseNewsLine(line) {
   return { text: line, url: null };
 }
 function normalizeNewsBody(cleanedBody) {
-  // URL 기준으로 뉴스 항목 분리, 뉴스 사이 줄바꿈만 (빈 줄 없음)
   const lines = cleanedBody.split('\n').map((l) => l.trim()).filter(Boolean);
   const items = [];
   let current = [];
