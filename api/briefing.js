@@ -102,12 +102,12 @@ async function runBriefing(overrideDate = null) {
 어제는 이런 하루를 보내셨네요
 오늘은 이렇게 해보는 게 어떨까요
 
-각 섹션:
-- 날씨: 줄바꿈 없이 한 문단. 서울 기온 섭씨만. web_search로 오늘 서울 날씨 검색해서 작성.
-- 일정: 시간순. 종일 1개뿐이거나 없으면 일기 요약 참고해서 활동 추천 한 마디 덧붙일 것.
-- 뉴스: 아래 기사 목록에서 ${excludeSources.join('/')} 제외하고 주요 시사 2개 선택. 각 뉴스마다 한두 줄 요약 + 배경 설명 한두 줄, ~입니다로 종결. URL은 마지막 문장 바로 뒤 괄호로 붙일 것: 본문입니다. (https://...) 두 뉴스 사이 빈 줄 하나. 뉴스 번호/라벨 금지.
-- 어제: 줄바꿈 없이 한 문단. 요약 1~2줄 + 구체적 행동 짚어 격려 1줄.
-- 오늘 제안: 행동제안 한 문단, 빈 줄, 인지전환 한 문단. 일기와 제언 참고해서 구체적으로.`;
+각 섹션 분량과 형식:
+- 날씨: 한 문단 3~4문장. 줄바꿈 없이. 서울 오늘(${todayStr}) 기온 섭씨만. web_search로 오늘 서울 날씨 검색.
+- 일정: 시간순 자연스럽게. 종일 1개뿐이거나 없으면 일기 요약 참고해서 활동 추천 한 마디 덧붙일 것.
+- 뉴스: 아래 기사 목록에서 ${excludeSources.join('/')} 제외하고 주요 시사 2개 선택. 각 뉴스마다 2~4문장 요약+배경설명, ~입니다로 종결. URL은 마지막 문장 바로 뒤 같은 줄에 괄호 없이 그냥 붙일 것: 본문입니다 URL주소 뉴스 번호/라벨 금지. 두 뉴스 사이 줄바꿈만, 빈 줄 없음.
+- 어제: 한 문단 3~4문장. 줄바꿈 없이. 요약+격려 포함.
+- 오늘 제안: 행동제안 3~4문장, 줄바꿈, 인지전환 3~4문장. 일기와 제언 참고해서 구체적으로.`;
 
   const userPrompt = `오늘(${todayStr}) 일정: ${todaySchedule || '(없음)'}
 어제(${yesterdayStr}) 일기 요약: ${diarySummary || '(없음)'}
@@ -121,9 +121,10 @@ ${newsText || '(없음)'}
   const briefingResult = await callClaude(ANTHROPIC_API_KEY, systemPrompt, userPrompt);
   const briefingText = (briefingResult.text || '(브리핑 생성 실패)').replace(/\*\*/g, '').trim();
 
+  const [y, mo, d] = todayStr.split('-').map(Number);
   const days = ['일', '월', '화', '수', '목', '금', '토'];
-  const dateObj = new Date(todayStr + 'T00:00:00+09:00');
-  const titleLabel = `${dateObj.getMonth() + 1}월 ${dateObj.getDate()}일 ${days[dateObj.getDay()]}요일 모닝 브리핑입니다.`;
+  const dow = new Date(y, mo - 1, d).getDay();
+  const titleLabel = `${mo}월 ${d}일 ${days[dow]}요일 모닝 브리핑입니다.`;
 
   const newBlocks = buildBriefingBlocks(briefingText);
 
@@ -253,14 +254,11 @@ function parseNewsLine(line) {
   return { text: line, url: null };
 }
 function normalizeNewsBody(cleanedBody) {
+  // URL 기준으로 뉴스 항목 분리, 뉴스 사이 줄바꿈만 (빈 줄 없음)
   const lines = cleanedBody.split('\n').map((l) => l.trim()).filter(Boolean);
   const items = [];
   let current = [];
   for (const line of lines) {
-    if (line === '---') {
-      if (current.length) { items.push(current.join(' ')); current = []; }
-      continue;
-    }
     current.push(line);
     if (/https?:\/\/\S+/.test(line)) {
       items.push(current.join(' '));
@@ -271,7 +269,7 @@ function normalizeNewsBody(cleanedBody) {
     if (items.length) items[items.length - 1] += ' ' + current.join(' ');
     else items.push(current.join(' '));
   }
-  return items.filter(Boolean).join('\n---\n');
+  return items.filter(Boolean).join('\n');
 }
 function buildBriefingBlocks(rawText) {
   const tokens = [
@@ -307,7 +305,6 @@ function buildBriefingBlocks(rawText) {
     for (const line of cleanedBody.split('\n')) {
       const trimmed = line.trim();
       if (!trimmed) continue;
-      if (trimmed === '---') { blocks.push(emptyParagraph()); continue; }
       const { text, url } = parseNewsLine(trimmed);
       if (url) blocks.push(linkParagraph(text, url));
       else blocks.push(bodyParagraph(trimmed));
