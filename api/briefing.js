@@ -30,16 +30,39 @@ async function fetchGoogleNewsRSS() {
     let m;
     while ((m = itemRegex.exec(xml)) !== null && items.length < 20) {
       const block = m[1];
-      const title = (block.match(/<title>([\s\S]*?)<\/title>/) || [])[1]?.replace(/<!\[CDATA\[|\]\]>/g, '').trim();
-      const link = (block.match(/<link>([\s\S]*?)<\/link>/) || (block.match(/href="([^"]+)"/) || []))[1]?.trim();
-      const desc = (block.match(/<description>([\s\S]*?)<\/description>/) || [])[1]?.replace(/<!\[CDATA\[|\]\]>/g, '').replace(/<[^>]+>/g, '').trim();
-      const source = (block.match(/<source[^>]*>([\s\S]*?)<\/source>/) || [])[1]?.replace(/<!\[CDATA\[|\]\]>/g, '').trim();
+      const title = (block.match(/<title>([\s\S]*?)<\/title>/) || [])[1]
+        ?.replace(/<!\[CDATA\[|\]\]>/g, '').trim();
+      const link = (block.match(/<link>([\s\S]*?)<\/link>/) || [])[1]?.trim();
+      const desc = (block.match(/<description>([\s\S]*?)<\/description>/) || [])[1]
+        ?.replace(/<!\[CDATA\[|\]\]>/g, '').replace(/<[^>]+>/g, '').trim();
+      const source = (block.match(/<source[^>]*>([\s\S]*?)<\/source>/) || [])[1]
+        ?.replace(/<!\[CDATA\[|\]\]>/g, '').trim();
       if (title && link) items.push({ title, link, desc: desc || '', source: source || '' });
     }
     return items;
   } catch (e) {
     console.error('RSS fetch failed', e);
     return [];
+  }
+}
+
+async function fetchDiary(token, yesterdayStr) {
+  try {
+    const res = await fetch(`https://api.notion.com/v1/databases/${DIARY_DB}/query`, {
+      method: 'POST',
+      headers: notionHeaders(token),
+      body: JSON.stringify({ filter: { property: '날짜', date: { equals: yesterdayStr } }, page_size: 1 }),
+    });
+    const data = await res.json();
+    const page = data.results?.[0];
+    if (!page) return { diarySummary: '', diarySuggest: '' };
+    return {
+      diarySummary: getRichText(page.properties['일기 요약']),
+      diarySuggest: getRichText(page.properties['제언']),
+    };
+  } catch (e) {
+    console.error('diary fetch failed', e);
+    return { diarySummary: '', diarySuggest: '' };
   }
 }
 
@@ -55,21 +78,18 @@ async function runBriefing(overrideDate = null) {
   yesterday.setDate(yesterday.getDate() - 1);
   const yesterdayStr = yesterday.toISOString().slice(0, 10);
 
-  const [todayScheduleResult, diaryResult, newsItems] = await Promise.all([
+  const [todaySchedule, diaryResult, newsItems] = await Promise.all([
     fetchTodayEvents(ICLOUD_CALENDAR_URLS, todayStr).catch(() => ''),
     fetchDiary(NOTION_TOKEN, yesterdayStr),
     fetchGoogleNewsRSS(),
   ]);
 
-  const todaySchedule = todayScheduleResult || '';
   const { diarySummary, diarySuggest } = diaryResult;
 
-  // 뉴스 텍스트 구성 (조중동 표시)
   const excludeSources = ['조선일보', '중앙일보', '동아일보', 'Chosun', 'JoongAng', 'Donga'];
   const newsText = newsItems
-    .map((item, i) => `${i + 1}. [${item.source}] ${item.title} / ${item.desc} / URL: ${item.link}`)
-    .join('
-');
+    .map((item, i) => `${i + 1}. [${item.source}] ${item.title}${item.desc ? ' / ' + item.desc : ''} / URL: ${item.link}`)
+    .join('\n');
 
   const systemPrompt = `너는 민영의 아침 브리핑을 작성하는 도우미야.
 
@@ -83,9 +103,9 @@ async function runBriefing(overrideDate = null) {
 오늘은 이렇게 해보는 게 어떨까요
 
 각 섹션:
-- 날씨: 줄바꿈 없이 한 문단. 서울 기온은 섭씨만. web_search로 오늘 서울 날씨 검색해서 작성.
+- 날씨: 줄바꿈 없이 한 문단. 서울 기온 섭씨만. web_search로 오늘 서울 날씨 검색해서 작성.
 - 일정: 시간순. 종일 1개뿐이거나 없으면 일기 요약 참고해서 활동 추천 한 마디 덧붙일 것.
-- 뉴스: 아래 기사 목록에서 조중동(${excludeSources.join('/')}) 제외하고 주요 시사 2개 선택. 각 뉴스마다 한두 줄 요약 + 배경 설명 한두 줄, ~입니다로 종결. URL은 마지막 문장 바로 뒤 괄호로: 본문입니다. (https://...) 두 뉴스 사이 빈 줄 하나. 뉴스 라벨 금지.
+- 뉴스: 아래 기사 목록에서 ${excludeSources.join('/')} 제외하고 주요 시사 2개 선택. 각 뉴스마다 한두 줄 요약 + 배경 설명 한두 줄, ~입니다로 종결. URL은 마지막 문장 바로 뒤 괄호로 붙일 것: 본문입니다. (https://...) 두 뉴스 사이 빈 줄 하나. 뉴스 번호/라벨 금지.
 - 어제: 줄바꿈 없이 한 문단. 요약 1~2줄 + 구체적 행동 짚어 격려 1줄.
 - 오늘 제안: 행동제안 한 문단, 빈 줄, 인지전환 한 문단. 일기와 제언 참고해서 구체적으로.`;
 
@@ -127,7 +147,10 @@ ${newsText || '(없음)'}
         headers: notionHeaders(NOTION_TOKEN),
         body: JSON.stringify({ properties: { '제목': { title: [{ text: { content: titleLabel } }] } } })
       });
-      const childrenData = await (await fetch(`https://api.notion.com/v1/blocks/${existingPageId}/children?page_size=100`, { headers: notionHeaders(NOTION_TOKEN) })).json();
+      const childrenData = await (await fetch(
+        `https://api.notion.com/v1/blocks/${existingPageId}/children?page_size=100`,
+        { headers: notionHeaders(NOTION_TOKEN) }
+      )).json();
       for (const block of (childrenData.results || [])) {
         await fetch(`https://api.notion.com/v1/blocks/${block.id}`, { method: 'DELETE', headers: notionHeaders(NOTION_TOKEN) });
       }
@@ -157,26 +180,6 @@ ${newsText || '(없음)'}
   return { ok: pageResult.ok, todayStr, briefingText, debug: briefingResult.debug, notion: pageResult };
 }
 
-async function fetchDiary(token, yesterdayStr) {
-  try {
-    const res = await fetch(`https://api.notion.com/v1/databases/${DIARY_DB}/query`, {
-      method: 'POST',
-      headers: notionHeaders(token),
-      body: JSON.stringify({ filter: { property: '날짜', date: { equals: yesterdayStr } }, page_size: 1 }),
-    });
-    const data = await res.json();
-    const page = data.results?.[0];
-    if (!page) return { diarySummary: '', diarySuggest: '' };
-    return {
-      diarySummary: getRichText(page.properties['일기 요약']),
-      diarySuggest: getRichText(page.properties['제언']),
-    };
-  } catch (e) {
-    console.error('diary fetch failed', e);
-    return { diarySummary: '', diarySuggest: '' };
-  }
-}
-
 async function callClaude(apiKey, systemPrompt, userPrompt) {
   try {
     const messages = [{ role: 'user', content: userPrompt }];
@@ -184,7 +187,11 @@ async function callClaude(apiKey, systemPrompt, userPrompt) {
     for (let turn = 0; turn < 2; turn++) {
       const res = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01'
+        },
         body: JSON.stringify({
           model: 'claude-haiku-4-5-20251001',
           max_tokens: 1500,
@@ -197,7 +204,10 @@ async function callClaude(apiKey, systemPrompt, userPrompt) {
       if (!res.ok || data.error) return { text: '', debug: { stage: 'claude_error', raw: data } };
       const textBlocks = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text);
       if (data.stop_reason !== 'tool_use') { finalText = textBlocks.join('\n').trim(); break; }
-      messages.push({ role: 'assistant', content: (data.content || []).map((b) => b.type === 'tool_result' ? { ...b, content: '(검색 완료)' } : b) });
+      messages.push({
+        role: 'assistant',
+        content: (data.content || []).map((b) => b.type === 'tool_result' ? { ...b, content: '(검색 완료)' } : b)
+      });
     }
     return { text: finalText.trim(), debug: null };
   } catch (error) {
@@ -205,12 +215,25 @@ async function callClaude(apiKey, systemPrompt, userPrompt) {
   }
 }
 
-function notionHeaders(token) { return { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'Notion-Version': '2022-06-28' }; }
-function getRichText(prop) { if (!prop) return ''; if (prop.rich_text) return prop.rich_text.map((t) => t.plain_text).join(''); if (prop.title) return prop.title.map((t) => t.plain_text).join(''); return ''; }
+function notionHeaders(token) {
+  return { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'Notion-Version': '2022-06-28' };
+}
+function getRichText(prop) {
+  if (!prop) return '';
+  if (prop.rich_text) return prop.rich_text.map((t) => t.plain_text).join('');
+  if (prop.title) return prop.title.map((t) => t.plain_text).join('');
+  return '';
+}
 function dividerBlock() { return { object: 'block', type: 'divider', divider: {} }; }
-function emptyParagraph() { return { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: '\u200b' } }] } }; }
-function titleParagraph(text) { return { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: text }, annotations: { bold: true, underline: true } }] } }; }
-function bodyParagraph(line) { return { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: line } }] } }; }
+function emptyParagraph() {
+  return { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: '\u200b' } }] } };
+}
+function titleParagraph(text) {
+  return { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: text }, annotations: { bold: true, underline: true } }] } };
+}
+function bodyParagraph(line) {
+  return { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: line } }] } };
+}
 function linkParagraph(text, url) {
   return {
     object: 'block', type: 'paragraph',
@@ -222,17 +245,13 @@ function linkParagraph(text, url) {
     }
   };
 }
-
 function parseNewsLine(line) {
-  // (URL) 형식
   const m1 = line.match(/^(.*?)\s*\((https?:\/\/[^\s)]+)\)\s*$/);
   if (m1) return { text: m1[1].trim(), url: m1[2] };
-  // bare URL
   const m2 = line.match(/^(.*?)\s*(https?:\/\/\S+)\s*$/);
   if (m2) return { text: m2[1].trim(), url: m2[2] };
   return { text: line, url: null };
 }
-
 function normalizeNewsBody(cleanedBody) {
   const lines = cleanedBody.split('\n').map((l) => l.trim()).filter(Boolean);
   const items = [];
@@ -254,7 +273,6 @@ function normalizeNewsBody(cleanedBody) {
   }
   return items.filter(Boolean).join('\n---\n');
 }
-
 function buildBriefingBlocks(rawText) {
   const tokens = [
     { sub: '오늘 날씨입니다', official: '오늘 날씨입니다.' },
@@ -271,14 +289,20 @@ function buildBriefingBlocks(rawText) {
     if (i > 0) blocks.push(dividerBlock());
     const current = positions[i];
     const next = positions[i + 1];
-    let cleanedBody = (next ? rawText.slice(current.pos + current.token.sub.length, next.pos) : rawText.slice(current.pos + current.token.sub.length)).trim();
-    if (current.token.sub === '어제는 이런 하루를' && cleanedBody.startsWith('보내셨네요')) cleanedBody = cleanedBody.slice('보내셨네요'.length).trim();
+    let cleanedBody = (next
+      ? rawText.slice(current.pos + current.token.sub.length, next.pos)
+      : rawText.slice(current.pos + current.token.sub.length)
+    ).trim();
+    if (current.token.sub === '어제는 이런 하루를' && cleanedBody.startsWith('보내셨네요'))
+      cleanedBody = cleanedBody.slice('보내셨네요'.length).trim();
     if (current.token.sub === '오늘은 이렇게 해보는 게') {
       if (cleanedBody.startsWith('어떨까요?')) cleanedBody = cleanedBody.slice('어떨까요?'.length).trim();
       else if (cleanedBody.startsWith('어떨까요')) cleanedBody = cleanedBody.slice('어떨까요'.length).trim();
     }
-    if (current.token.sub === '오늘 날씨입니다') cleanedBody = cleanedBody.split('\n').map((l) => l.trim()).filter(Boolean).join(' ');
-    if (current.token.sub === '오늘 뉴스입니다') cleanedBody = normalizeNewsBody(cleanedBody);
+    if (current.token.sub === '오늘 날씨입니다')
+      cleanedBody = cleanedBody.split('\n').map((l) => l.trim()).filter(Boolean).join(' ');
+    if (current.token.sub === '오늘 뉴스입니다')
+      cleanedBody = normalizeNewsBody(cleanedBody);
     blocks.push(titleParagraph(current.token.official));
     for (const line of cleanedBody.split('\n')) {
       const trimmed = line.trim();
@@ -291,7 +315,8 @@ function buildBriefingBlocks(rawText) {
     while (blocks.length > 0) {
       const last = blocks[blocks.length - 1];
       const rt = last.type === 'paragraph' ? last.paragraph.rich_text : null;
-      if (rt && (rt.length === 0 || (rt.length === 1 && ['', '\u200b'].includes(rt[0]?.text?.content?.trim())))) blocks.pop();
+      if (rt && (rt.length === 0 || (rt.length === 1 && ['', '\u200b'].includes(rt[0]?.text?.content?.trim()))))
+        blocks.pop();
       else break;
     }
   }
@@ -305,7 +330,11 @@ async function fetchTodayEvents(icsUrls, todayStr) {
     try { events.push(...parseIcsForDate(await (await fetch(url)).text(), todayStr)); }
     catch (e) { console.error('calendar fetch failed:', url, e); }
   }
-  events.sort((a, b) => { const [aK, aT] = a.split('|'); const [bK, bT] = b.split('|'); return aT !== bT ? aT.localeCompare(bT) : aK.localeCompare(bK); });
+  events.sort((a, b) => {
+    const [aK, aT] = a.split('|');
+    const [bK, bT] = b.split('|');
+    return aT !== bT ? aT.localeCompare(bT) : aK.localeCompare(bK);
+  });
   return events.map((e) => e.split('|').slice(2).join('|')).join(', ');
 }
 function parseIcsForDate(icsText, todayStr) {
@@ -320,8 +349,9 @@ function parseIcsForDate(icsText, todayStr) {
     const eventStart = parseYMD(dateStr);
     const rruleMatch = block.match(/RRULE:(.+)/);
     const exdates = [...block.matchAll(/EXDATE(?:;[^:\r\n]*)?:(\d{8})/g)].map((m) => m[1]);
-    const occurs = !rruleMatch ? dateStr === todayStr.replace(/-/g, '') :
-      compareYMD(targetDate, eventStart) >= 0 && !exdates.includes(todayStr.replace(/-/g, '')) && matchesRRule(rruleMatch[1], eventStart, targetDate);
+    const occurs = !rruleMatch
+      ? dateStr === todayStr.replace(/-/g, '')
+      : compareYMD(targetDate, eventStart) >= 0 && !exdates.includes(todayStr.replace(/-/g, '')) && matchesRRule(rruleMatch[1], eventStart, targetDate);
     if (!occurs) continue;
     let timeLabel = '하루 종일', sortKey = '00:00', dayInfo = '';
     if (timeStr) {
@@ -336,20 +366,34 @@ function parseIcsForDate(icsText, todayStr) {
   }
   return results;
 }
-function parseYMD(str) { const s = str.replace(/-/g, ''); return { y: +s.slice(0,4), m: +s.slice(4,6), d: +s.slice(6,8) }; }
-function compareYMD(a, b) { return a.y !== b.y ? a.y-b.y : a.m !== b.m ? a.m-b.m : a.d-b.d; }
-function toDate(ymd) { return new Date(ymd.y, ymd.m-1, ymd.d); }
+function parseYMD(str) { const s = str.replace(/-/g, ''); return { y: +s.slice(0, 4), m: +s.slice(4, 6), d: +s.slice(6, 8) }; }
+function compareYMD(a, b) { return a.y !== b.y ? a.y - b.y : a.m !== b.m ? a.m - b.m : a.d - b.d; }
+function toDate(ymd) { return new Date(ymd.y, ymd.m - 1, ymd.d); }
 function matchesRRule(rrule, start, target) {
   const parts = Object.fromEntries(rrule.split(';').map((kv) => kv.split('=')));
   const interval = +(parts.INTERVAL || 1);
-  if (parts.UNTIL && compareYMD(target, parseYMD(parts.UNTIL.slice(0,8))) > 0) return false;
+  if (parts.UNTIL && compareYMD(target, parseYMD(parts.UNTIL.slice(0, 8))) > 0) return false;
   const dayDiff = Math.round((toDate(target) - toDate(start)) / 86400000);
   if (dayDiff < 0) return false;
   switch (parts.FREQ) {
     case 'DAILY': return dayDiff % interval === 0;
-    case 'WEEKLY': { const wd = Math.floor(dayDiff/7); if (wd%interval!==0) return false; return parts.BYDAY ? parts.BYDAY.split(',').includes(['SU','MO','TU','WE','TH','FR','SA'][toDate(target).getDay()]) : toDate(target).getDay()===toDate(start).getDay(); }
-    case 'MONTHLY': { if (target.d!==start.d) return false; const md=(target.y-start.y)*12+(target.m-start.m); return md>=0&&md%interval===0; }
-    case 'YEARLY': { if (target.m!==start.m||target.d!==start.d) return false; const yd=target.y-start.y; return yd>=0&&yd%interval===0; }
+    case 'WEEKLY': {
+      const wd = Math.floor(dayDiff / 7);
+      if (wd % interval !== 0) return false;
+      return parts.BYDAY
+        ? parts.BYDAY.split(',').includes(['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'][toDate(target).getDay()])
+        : toDate(target).getDay() === toDate(start).getDay();
+    }
+    case 'MONTHLY': {
+      if (target.d !== start.d) return false;
+      const md = (target.y - start.y) * 12 + (target.m - start.m);
+      return md >= 0 && md % interval === 0;
+    }
+    case 'YEARLY': {
+      if (target.m !== start.m || target.d !== start.d) return false;
+      const yd = target.y - start.y;
+      return yd >= 0 && yd % interval === 0;
+    }
     default: return false;
   }
 }
