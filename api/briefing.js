@@ -90,6 +90,13 @@ async function runBriefing(overrideDate = null) {
   const newsText = newsItems
     .map((item, i) => `${i + 1}. [${item.source}] ${item.title}${item.desc ? ' / ' + item.desc : ''} / URL: ${item.link}`)
     .join('\n');
+    
+  // 요일 계산 로직 (에러 방지를 위해 여기서 한 번만 선언)
+  const [y, mo, d] = todayStr.split('-').map(Number);
+  const days = ['일', '월', '화', '수', '목', '금', '토'];
+  const dow = new Date(y, mo - 1, d).getDay();
+  const dayName = days[dow]; 
+  const isWeekday = dow >= 1 && dow <= 5; // 월~금 여부
 
   const systemPrompt = `너는 민영의 아침 브리핑을 작성하는 비서야.
 
@@ -105,12 +112,13 @@ async function runBriefing(overrideDate = null) {
 각 섹션 분량과 형식:
 - 날씨: 250자 이내. 한 문단 3~4문장. 줄바꿈 없이. web_search로 오늘 서울 날씨를 섭씨 기준으로 검색. 검색 출처/단위 변환 과정 언급 절대 금지. 기상캐스터처럼 "서울은 오늘 최고기온 N도, 최저 N도로..." 형식으로 시작. 날씨 사실 먼저, 체감·생활 조언으로 마무리.
 - 일정: 250자 이내. 시간순 자연스럽게. 종일 1개뿐이거나 없으면 일기 요약 참고해서 활동 추천 한 마디 덧붙일 것.
-- 뉴스: 뉴스당 300자 이내, 총 600자 이내. 아래 기사 목록에서 ${excludeSources.join('/')} 제외하고 주요 시사 2개 선택. 연합뉴스에 따르면~과 같이 출처 표기는 금지. 뉴 각 뉴스마다 2~4문장 요약+배경설명, ~입니다로 종결. URL은 마지막 문장 바로 뒤 같은 줄에 괄호 없이 그냥 붙일 것: 본문입니다 URL주소 뉴스 번호/라벨 금지. 두 뉴스 사이 줄바꿈만, 빈 줄 없음.
+- 뉴스: 뉴스당 300자 이내, 총 600자 이내. 아래 기사 목록에서 ${excludeSources.join('/')} 제외하고 주요 시사 2개 선택. 연합뉴스에 따르면~과 같이 출처 표기는 금지. 각 뉴스마다 2~4문장 요약+배경설명, ~입니다로 종결. URL은 마지막 문장 바로 뒤 같은 줄에 괄호 문장 없이 그냥 붙일 것. 두 뉴스 사이 줄바꿈만, 빈 줄 없음.
 - 어제: 300자 이내. 한 문단 3~4문장. 줄바꿈 없이. 요약+격려 포함.
 - 오늘 제안: 400자 이내. 행동제안 3~4문장, 줄바꿈, 인지전환 3~4문장. 일기와 제언 참고해서 구체적으로.
+[중요 규칙: 오늘이 평일(월~금)인데 일정이 없다면, 쉬는 날이 아니라 '평범하게 출근하는 날'로 간주하세요. 이 경우 출근 전 10분 동안 할 수 있는 간단한 리프레시 활동이나, 퇴근 후 저녁 시간을 기분 좋게 보낼 수 있는 소소한 일정을 제안해 주세요.]
 전체 합계 1800자 이내.`;
 
-  const userPrompt = `오늘(${todayStr}) 일정: ${todaySchedule || '(없음)'}
+  const userPrompt = `오늘(${todayStr}, ${dayName}요일) 일정: ${todaySchedule || '(없음)'}
 어제(${yesterdayStr}) 일기 요약: ${diarySummary || '(없음)'}
 어제 제언: ${diarySuggest || '(없음)'}
 
@@ -122,10 +130,8 @@ ${newsText || '(없음)'}
   const briefingResult = await callClaude(ANTHROPIC_API_KEY, systemPrompt, userPrompt);
   const briefingText = (briefingResult.text || '(브리핑 생성 실패)').replace(/\*\*/g, '').trim();
 
-  const [y, mo, d] = todayStr.split('-').map(Number);
-  const days = ['일', '월', '화', '수', '목', '금', '토'];
-  const dow = new Date(y, mo - 1, d).getDay();
-  const titleLabel = `${mo}월 ${d}일 ${days[dow]}요일 모닝 브리핑입니다.`;
+  // (수정된 부분) 위에서 구한 변수들을 재사용하여 제목 생성 (중복 선언 제거)
+  const titleLabel = `${mo}월 ${d}일 ${dayName}요일 모닝 브리핑입니다.`;
 
   const newBlocks = buildBriefingBlocks(briefingText);
 
