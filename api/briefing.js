@@ -1,3 +1,4 @@
+
 const DIARY_DB = '37451f4140c5808e9141c8804e892661';
 const MORNING_BRIEFING_DB = '37d51f4140c580dca4d5cbec7e5534e3';
 
@@ -90,33 +91,44 @@ async function runBriefing(overrideDate = null) {
   const newsText = newsItems
     .map((item, i) => `${i + 1}. [${item.source}] ${item.title}${item.desc ? ' / ' + item.desc : ''} / URL: ${item.link}`)
     .join('\n');
-    
-  // 요일 계산 로직 (에러 방지를 위해 여기서 한 번만 선언)
+
   const [y, mo, d] = todayStr.split('-').map(Number);
   const days = ['일', '월', '화', '수', '목', '금', '토'];
   const dow = new Date(y, mo - 1, d).getDay();
-  const dayName = days[dow]; 
-  const isWeekday = dow >= 1 && dow <= 5; // 월~금 여부
+  const dayName = days[dow];
+  const isWeekday = dow >= 1 && dow <= 5;
 
+  // ============================================
+  // 시스템 프롬프트: JSON 전용 + 말투 규칙 강화
+  // ============================================
   const systemPrompt = `너는 민영의 아침 브리핑을 작성하는 비서야.
 
-말투: 한국어, ~요/~입니다 자연스럽게 섞어서. 날씨와 뉴스 섹션은 캐스터처럼 ~입니다 위주. 나머지는 ~요와 ~입니다 번갈아 사용. ~하셨어요/~하실 같은 주체높임 전부 금지. ~십시오/~것입니다 금지. 이모지/구어체/마크다운 볼드 금지. 음성으로 읽힐 글이므로 괄호/기호 금지.
+[출력 형식 - 절대 규칙]
+- 반드시 순수 JSON 객체 하나만 출력한다. 그 외 어떤 텍스트도 금지.
+- "검색하겠습니다", "~를 바탕으로 작성하겠습니다" 같은 사전 설명, 사고 과정, 검색 경과 보고를 절대 출력하지 않는다. 첫 글자부터 바로 { 로 시작한다.
+- 마크다운 백틱(\`\`\`)도 금지.
 
-헤더 5개를 정확히 이 텍스트로 순서대로 작성:
-오늘 날씨입니다
-오늘 일정입니다
-오늘 뉴스입니다
-어제는 이런 하루를 보내셨네요
-오늘은 이렇게 해보는 게 어떨까요
+[말투 규칙 - 절대 규칙]
+- ~요/~입니다체를 자연스럽게 섞어 쓴다.
+- 주체높임(상대를 높이는 어미) 전부 금지: ~하셨어요, ~하실, ~보내셨네요, ~이세요, ~하시는, ~드셨어요 같은 형태를 본문에 쓰지 않는다.
+  - 금지 예시 → 올바른 예시
+  - "하루 종일 재택근무를 하시는 날이지만" → "하루 종일 재택근무하는 날이지만"
+  - "기분 좋게 시작해 보세요" → 이건 청유형이라 허용 (보세요/해보세요는 OK, 하시는/하셨어요만 금지)
+  - "일정이 있으셨네요" → "일정이 있었어요"
+  - "이렇게 보내셨어요" → "이렇게 보냈어요"
+- ~십시오/~것입니다 금지.
+- 이모지/구어체 금지. 음성으로 읽히는 글이므로 괄호·기호 최소화 (URL 제외).
 
-각 섹션 분량과 형식:
-- 날씨: 250자 이내. 한 문단 3~4문장. 줄바꿈 없이. web_search로 오늘 서울 날씨를 섭씨 기준으로 검색. 검색 출처/단위 변환 과정 언급 절대 금지. 기상캐스터처럼 "서울은 오늘 최고기온 N도, 최저 N도로..." 형식으로 시작. 날씨 사실 먼저, 체감·생활 조언으로 마무리.
-- 일정: 250자 이내. 시간순 자연스럽게. 종일 1개뿐이거나 없으면 일기 요약 참고해서 활동 추천 한 마디 덧붙일 것.
-- 뉴스: 뉴스당 300자 이내, 총 600자 이내. 아래 기사 목록에서 ${excludeSources.join('/')} 제외하고 주요 시사 2개 선택. 연합뉴스에 따르면~과 같이 출처 표기는 금지. 각 뉴스마다 2~4문장 요약+배경설명, ~입니다로 종결. URL은 마지막 문장 바로 뒤 같은 줄에 괄호 문장 없이 그냥 붙일 것. 두 뉴스 사이 줄바꿈만, 빈 줄 없음.
-- 어제: 300자 이내. 한 문단 3~4문장. 줄바꿈 없이. 요약+격려 포함.
-- 오늘 제안: 400자 이내. 행동제안 3~4문장, 줄바꿈, 인지전환 3~4문장. 일기와 제언 참고해서 구체적으로.
-[중요 규칙: 오늘이 평일(월~금)인데 일정이 없다면, 쉬는 날이 아니라 '평범하게 출근하는 날'로 간주하세요. 이 경우 출근 전 10분 동안 할 수 있는 간단한 리프레시 활동이나, 퇴근 후 저녁 시간을 기분 좋게 보낼 수 있는 소소한 일정을 제안해 주세요.]
-전체 합계 1800자 이내.`;
+[섹션별 내용 규칙]
+- weather: 250자 이내, 한 문단 3~4문장, 줄바꿈 없음. web_search로 오늘 서울 날씨 섭씨 기준 검색. 검색 출처나 검색 과정 언급 절대 금지 — 결과만 자연스럽게 서술. "서울은 오늘 최고기온 N도..." 형식으로 시작, 체감/생활 조언으로 마무리.
+- schedule: 250자 이내. 시간순 자연스럽게. 일정이 1개뿐이거나 없으면 일기 요약 참고해서 활동 한 마디 추천.
+- news: 정확히 2개 항목 배열. 각 {"summary": "...", "url": "..."}. summary는 300자 이내, 2~4문장, ~입니다로 종결, "OOO에 따르면" 같은 출처표기 금지. ${excludeSources.join('/')} 출처 기사는 제외.
+- yesterday: 300자 이내, 한 문단 3~4문장, 줄바꿈 없음. 요약 + 격려.
+- suggestion: 400자 이내. 행동제안 3~4문장 + 줄바꿈 + 인지전환 3~4문장. 일기/제언 참고해서 구체적으로.
+- 평일(월~금)인데 일정이 없으면 쉬는 날 취급하지 말고, 출근 전 짧은 리프레시나 퇴근 후 소소한 일정을 제안.
+
+[출력 JSON 스키마 - 이 형식 그대로]
+{"weather":"...","schedule":"...","news":[{"summary":"...","url":"..."},{"summary":"...","url":"..."}],"yesterday":"...","suggestion":"..."}`;
 
   const userPrompt = `오늘(${todayStr}, ${dayName}요일) 일정: ${todaySchedule || '(없음)'}
 어제(${yesterdayStr}) 일기 요약: ${diarySummary || '(없음)'}
@@ -125,15 +137,28 @@ async function runBriefing(overrideDate = null) {
 기사 목록:
 ${newsText || '(없음)'}
 
-오늘 브리핑 작성해줘.`;
+위 정보로 JSON 브리핑을 작성해줘.`;
 
   const briefingResult = await callClaude(ANTHROPIC_API_KEY, systemPrompt, userPrompt);
-  const briefingText = (briefingResult.text || '(브리핑 생성 실패)').replace(/\*\*/g, '').trim();
 
-  // (수정된 부분) 위에서 구한 변수들을 재사용하여 제목 생성 (중복 선언 제거)
+  // 프리앰블이 섞여 있어도 JSON 부분만 안전하게 추출
+  let parsed;
+  try {
+    const raw = briefingResult.text || '';
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    parsed = JSON.parse(jsonMatch ? jsonMatch[0] : raw);
+  } catch (e) {
+    parsed = {
+      weather: '브리핑 생성에 실패했습니다.',
+      schedule: '',
+      news: [],
+      yesterday: '',
+      suggestion: '',
+    };
+  }
+
   const titleLabel = `${mo}월 ${d}일 ${dayName}요일 모닝 브리핑입니다.`;
-
-  const newBlocks = buildBriefingBlocks(briefingText);
+  const newBlocks = buildBriefingBlocksFromJSON(parsed);
 
   let existingPageId = null;
   try {
@@ -170,6 +195,7 @@ ${newsText || '(없음)'}
     });
     pageResult = { ok: appendRes.ok, mode: 'updated', pageId: existingPageId };
   } else {
+    // 생성: 빈 children으로 만든 뒤, 혹시 모를 자동삽입 블록을 정리하고 append
     const createRes = await fetch(`https://api.notion.com/v1/pages`, {
       method: 'POST',
       headers: notionHeaders(NOTION_TOKEN),
@@ -179,20 +205,37 @@ ${newsText || '(없음)'}
           '제목': { title: [{ text: { content: titleLabel } }] },
           '날짜': { date: { start: todayStr } }
         },
-        children: newBlocks,
       }),
     });
-    pageResult = { ok: createRes.ok, mode: 'created', pageId: (await createRes.json()).id };
+    const createData = await createRes.json();
+    const newPageId = createData.id;
+
+    try {
+      const childrenData = await (await fetch(
+        `https://api.notion.com/v1/blocks/${newPageId}/children?page_size=100`,
+        { headers: notionHeaders(NOTION_TOKEN) }
+      )).json();
+      for (const block of (childrenData.results || [])) {
+        await fetch(`https://api.notion.com/v1/blocks/${block.id}`, { method: 'DELETE', headers: notionHeaders(NOTION_TOKEN) });
+      }
+    } catch (e) { console.error('template cleanup failed', e); }
+
+    const appendRes = await fetch(`https://api.notion.com/v1/blocks/${newPageId}/children`, {
+      method: 'PATCH',
+      headers: notionHeaders(NOTION_TOKEN),
+      body: JSON.stringify({ children: newBlocks }),
+    });
+    pageResult = { ok: appendRes.ok && createRes.ok, mode: 'created', pageId: newPageId };
   }
 
-  return { ok: pageResult.ok, todayStr, briefingText, debug: briefingResult.debug, notion: pageResult };
+  return { ok: pageResult.ok, todayStr, briefing: parsed, debug: briefingResult.debug, notion: pageResult };
 }
 
 async function callClaude(apiKey, systemPrompt, userPrompt) {
   try {
     const messages = [{ role: 'user', content: userPrompt }];
     let finalText = '';
-    for (let turn = 0; turn < 2; turn++) {
+    for (let turn = 0; turn < 3; turn++) {
       const res = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -212,12 +255,15 @@ async function callClaude(apiKey, systemPrompt, userPrompt) {
       if (!res.ok || data.error) return { text: '', debug: { stage: 'claude_error', raw: data } };
       const textBlocks = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text);
       if (data.stop_reason !== 'tool_use') { finalText = textBlocks.join('\n').trim(); break; }
+      messages.push({ role: 'assistant', content: data.content });
       messages.push({
-        role: 'assistant',
-        content: (data.content || []).map((b) => b.type === 'tool_result' ? { ...b, content: '(검색 완료)' } : b)
+        role: 'user',
+        content: (data.content || [])
+          .filter((b) => b.type === 'tool_use')
+          .map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: '(검색 완료, 결과 반영해서 JSON으로 응답)' }))
       });
     }
-    return { text: finalText.trim(), debug: null };
+    return { text: finalText.trim(), debug: finalText ? null : { stage: 'no_final_text' } };
   } catch (error) {
     return { text: '', debug: { stage: 'claude_exception', error: String(error) } };
   }
@@ -250,76 +296,31 @@ function linkParagraph(text, url) {
     }
   };
 }
-function parseNewsLine(line) {
-  const m1 = line.match(/^(.*?)\s*\((https?:\/\/[^\s)]+)\)\s*$/);
-  if (m1) return { text: m1[1].trim(), url: m1[2] };
-  const m2 = line.match(/^(.*?)\s*(https?:\/\/\S+)\s*$/);
-  if (m2) return { text: m2[1].trim(), url: m2[2] };
-  return { text: line, url: null };
-}
-function normalizeNewsBody(cleanedBody) {
-  const lines = cleanedBody.split('\n').map((l) => l.trim()).filter(Boolean);
-  const items = [];
-  let current = [];
-  for (const line of lines) {
-    current.push(line);
-    if (/https?:\/\/\S+/.test(line)) {
-      items.push(current.join(' '));
-      current = [];
-    }
-  }
-  if (current.length) {
-    if (items.length) items[items.length - 1] += ' ' + current.join(' ');
-    else items.push(current.join(' '));
-  }
-  return items.filter(Boolean).join('\n');
-}
-function buildBriefingBlocks(rawText) {
-  const tokens = [
-    { sub: '오늘 날씨입니다', official: '오늘 날씨입니다.' },
-    { sub: '오늘 일정입니다', official: '오늘 일정입니다.' },
-    { sub: '오늘 뉴스입니다', official: '오늘 뉴스입니다.' },
-    { sub: '어제는 이런 하루를', official: '어제는 이런 하루를 보내셨네요.' },
-    { sub: '오늘은 이렇게 해보는 게', official: '오늘은 이렇게 해보는 게 어떨까요?' }
+
+// ============================================
+// JSON 파싱 결과로 블록 생성 - 헤더 텍스트 매칭 자체가 필요 없어짐
+// ============================================
+function buildBriefingBlocksFromJSON(data) {
+  const sections = [
+    { official: '오늘 날씨입니다.', body: data.weather },
+    { official: '오늘 일정입니다.', body: data.schedule },
+    { official: '오늘 뉴스입니다.', news: data.news },
+    { official: '어제는 이런 하루를 보내셨네요.', body: data.yesterday },
+    { official: '오늘은 이렇게 해보는 게 어떨까요?', body: data.suggestion },
   ];
-  const positions = [];
-  tokens.forEach((t) => { const pos = rawText.indexOf(t.sub); if (pos !== -1) positions.push({ pos, token: t }); });
-  positions.sort((a, b) => a.pos - b.pos);
   const blocks = [];
-  for (let i = 0; i < positions.length; i++) {
+  sections.forEach((s, i) => {
     if (i > 0) blocks.push(dividerBlock());
-    const current = positions[i];
-    const next = positions[i + 1];
-    let cleanedBody = (next
-      ? rawText.slice(current.pos + current.token.sub.length, next.pos)
-      : rawText.slice(current.pos + current.token.sub.length)
-    ).trim();
-    if (current.token.sub === '어제는 이런 하루를' && cleanedBody.startsWith('보내셨네요'))
-      cleanedBody = cleanedBody.slice('보내셨네요'.length).trim();
-    if (current.token.sub === '오늘은 이렇게 해보는 게') {
-      if (cleanedBody.startsWith('어떨까요?')) cleanedBody = cleanedBody.slice('어떨까요?'.length).trim();
-      else if (cleanedBody.startsWith('어떨까요')) cleanedBody = cleanedBody.slice('어떨까요'.length).trim();
+    blocks.push(titleParagraph(s.official));
+    if (s.news && Array.isArray(s.news)) {
+      s.news.forEach((n) => {
+        if (n?.summary && n?.url) blocks.push(linkParagraph(n.summary.trim(), n.url));
+        else if (n?.summary) blocks.push(bodyParagraph(n.summary.trim()));
+      });
+    } else if (s.body) {
+      blocks.push(bodyParagraph(String(s.body).trim()));
     }
-    if (current.token.sub === '오늘 날씨입니다')
-      cleanedBody = cleanedBody.split('\n').map((l) => l.trim()).filter(Boolean).join(' ');
-    if (current.token.sub === '오늘 뉴스입니다')
-      cleanedBody = normalizeNewsBody(cleanedBody);
-    blocks.push(titleParagraph(current.token.official));
-    for (const line of cleanedBody.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      const { text, url } = parseNewsLine(trimmed);
-      if (url) blocks.push(linkParagraph(text, url));
-      else blocks.push(bodyParagraph(trimmed));
-    }
-    while (blocks.length > 0) {
-      const last = blocks[blocks.length - 1];
-      const rt = last.type === 'paragraph' ? last.paragraph.rich_text : null;
-      if (rt && (rt.length === 0 || (rt.length === 1 && ['', '\u200b'].includes(rt[0]?.text?.content?.trim()))))
-        blocks.pop();
-      else break;
-    }
-  }
+  });
   return blocks.slice(0, 100);
 }
 
